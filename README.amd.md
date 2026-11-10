@@ -215,11 +215,16 @@ then encodes and copies the source audio through. A 140 s 4K film took about
   inter-process delay (0 s and 15 s both fail). Tracked in issue #3.
 
   **Practical consequence:** `tools/amd/dlss5-amd-video.ps1` is reliable because it
+  **Practical consequence:** `tools/amd/dlss5-amd-video.ps1` is reliable because it
   holds the GPU for the length of a run. Anything that starts the runtime from an idle
   desktop — including the player's own export — can hit this, so if an export fails
   immediately, run something GPU-heavy alongside it and try again.
+
+  Note that `dlss5-convert` succeeds without the workaround too: the clip in the table
+  above ran with an `ffmpeg` decode loop alongside it, but the per-run warm-up of
+  ~4200 frames is itself enough to keep the GPU out of its lowest state.
 - No RTX VSR, no DLSS Super Resolution, no frame generation on AMD. The convert
-  probe says so: `sr_engines=none`, `stages=nr,fg`. Earlier builds of this branch
+  probe says so: `sr_engines=none`, `stages=nr`. Earlier builds of this branch
   advertised `sr_engines=dlss` on a Radeon, which would have offered a stage whose
   engine cannot start.
 - Upstream's CTest suites: 19 of 20 pass. The one failure,
