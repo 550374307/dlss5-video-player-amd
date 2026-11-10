@@ -1708,7 +1708,15 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     }
     if(!DeviceHR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    return PresentSwapchain("Present");
+    const bool presented=PresentSwapchain("Present");
+    // The AMD add-on runs the network inside Present and composites onto the
+    // backbuffer it was handed, so the image that was just presented is the neural
+    // output. It is copied here, after the present and on the same queue, because
+    // the frame's command list has already been closed and the capture needs a
+    // resource it can sample on its own list. NVIDIA does not need this: RenoDX
+    // writes m_dlssOutput inside EvaluateFeature and the capture reads that.
+    if(presented && m_amdNeuralBackend && m_captureOutput) RecordAmdPresentedCopy();
+    return presented;
 }
 
 bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,
@@ -2186,7 +2194,13 @@ void D3D12Renderer::RecordSubtitleUpload(ID3D12GraphicsCommandList*cmd,uint32_t 
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     capture.pixels.clear();capture.width=0;capture.height=0;capture.id={};
-    if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
+    // The synchronous form is the one the first frame of a job uses, before its
+    // evidence receipt loop can resubmit. On AMD there is no NGX evaluate to have
+    // succeeded, so the equivalent fact is that the presented frame was copied.
+    if(m_amdNeuralBackend){
+        if(!m_amdPresentedValid||!m_amdPresentedWidth||!m_amdPresentedHeight)return false;
+    } else if(!m_lastDLSSUsed||!m_outputW||!m_outputH)
+        return false;
     // Whatever the active capture format produces, not four bytes per pixel: an NV12
     // capture is 1.5, and the size is the contract the caller checks the frame against.
     const uint64_t tightBytes64=d3d12_renderer_detail::CaptureFrameBytes(m_captureFormat,m_outputW,m_outputH);
@@ -2226,11 +2240,19 @@ bool D3D12Renderer::SetDirectEncodeSurfaces(NvencSurfacePool*pool,std::vector<ui
 bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // The readback ring only exists when Initialize was asked for it.
     if(!m_captureOutput)return false;
-    if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
+    // On NVIDIA this says "the NGX evaluate ran this frame, so there is an output
+    // to capture". On the AMD backend the evaluate never runs - the add-on runs the
+    // network inside Present - and the equivalent fact is that the presented frame
+    // was copied out below.
+    if(m_amdNeuralBackend?(!m_amdPresentedValid||!m_amdPresentedWidth||!m_amdPresentedHeight)
+                        :(!m_lastDLSSUsed||!m_outputW||!m_outputH))return false;
     if(m_capturePending>=CaptureSlots)return false;
     const bool planar=d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat);
-    if(m_gpuUnusable||!m_cacheOutput||!m_dlssOutput||!m_queue||!m_rootSig||!m_psoCacheCapture)
+    // m_dlssOutput is not required on AMD: the capture samples the presented copy
+    // instead, and the NVIDIA resource is empty there by definition.
+    if(m_gpuUnusable||!m_cacheOutput||!m_queue||!m_rootSig||!m_psoCacheCapture)
         return false;
+    if(!m_amdNeuralBackend&&!m_dlssOutput)return false;
     if(planar&&(!m_captureLuma||!m_captureChroma||!m_psoCaptureLuma||!m_psoCaptureChroma))return false;
     const uint32_t readbackSlot=m_captureWrite;
     if(!m_cacheReadback[readbackSlot])return false;
@@ -2273,6 +2295,10 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // than cache an unstabilized frame under a stabilized key.
     uint32_t captured=1u;
     if(!RecordTemporalStability(cmd,captured))return false;
+    // Where the capture reads: the neural output (1) on NVIDIA, the frame the AMD
+    // add-on composited on a Radeon. A temporal stability rung above Off replaces
+    // it with the pass's own output, which is a neural frame either way.
+    if(m_amdNeuralBackend&&captured==1u)captured=AmdPresentedSRV;
     cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
     auto target=RTV(planar?FrameCount+3:FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
@@ -2364,6 +2390,10 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     m_captureSurface[readbackSlot]=directSurface;surfaceGuard.index=CaptureReadbackView::kNoDirectSurface;
     m_captureWrite=(readbackSlot+1u)%CaptureSlots;
     ++m_capturePending;
+    // One capture per presented frame. Leaving it set would let a frame whose copy
+    // never ran be captured from the previous frame's image - a stale render under
+    // a fresh identity, which is exactly what the evidence chain exists to prevent.
+    if(m_amdNeuralBackend)m_amdPresentedValid=false;
     return true;
 }
 
@@ -3032,6 +3062,86 @@ bool D3D12Renderer::ReleaseDLSSFeatureForIdle(){
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
+
+// Keeps the frame the AMD add-on just composited. Called after PresentSwapchain,
+// on the backbuffer that was presented, exactly once per presented frame.
+//
+// The capture that follows needs a resource it can sample on its own command
+// list, and the backbuffer cannot be one: it is already in PRESENT for the
+// compositor, and handing it to another list would break the swapchain's
+// ownership rules. So the presented image is copied once into a private texture,
+// which is what AmdPresentedSRV views. This is the AMD counterpart of reading
+// m_dlssOutput; the copy is the price of the add-on running inside Present.
+void D3D12Renderer::RecordAmdPresentedCopy(){
+    if(!m_device||!m_queue||!m_swapchain)return;
+    const uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();
+    if(bi>=SwapchainBuffers||!m_backbuffers[bi])return;
+    // The backbuffer's own description, not the render size: the swapchain is
+    // sized to the window and the render targets to the frame, and the copy has to
+    // match the source exactly.
+    const D3D12_RESOURCE_DESC sourceDesc=m_backbuffers[bi]->GetDesc();
+    const uint32_t width=static_cast<uint32_t>(sourceDesc.Width);
+    const uint32_t height=sourceDesc.Height;
+    if(!width||!height)return;
+    // The capture draw sizes itself to the output, and the presented frame is the
+    // backbuffer. They are the same whenever the window shows the frame at 1:1, and
+    // PresentScale only makes them differ when the window is a different shape - in
+    // which case this copy would hand the capture a differently sized image than it
+    // is about to write. Refusing here leaves m_amdPresentedValid false and the
+    // capture declines that frame, which is the same trade the NVIDIA path makes
+    // for a frame whose evaluate did not run.
+    if(width!=m_outputW||height!=m_outputH){
+        LOG("AMD capture: the presented backbuffer is "<<width<<"x"<<height<<", the output is "
+            <<m_outputW<<"x"<<m_outputH<<"; this frame is not captured.");
+        m_amdPresentedValid=false;
+        return;
+    }
+
+    // (Re)create the destination when the swapchain size moved. A resize already
+    // waited for the GPU, so releasing the old one here cannot pull a resource
+    // the queue is still reading.
+    if(!m_amdPresentedCopy||m_amdPresentedWidth!=width||m_amdPresentedHeight!=height){
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width=width;desc.Height=height;desc.DepthOrArraySize=1;desc.MipLevels=1;
+        desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;
+        desc.Flags=D3D12_RESOURCE_FLAG_NONE;
+        auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+        m_amdPresentedCopy.Reset();
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,
+               IID_PPV_ARGS(&m_amdPresentedCopy)),"Create the AMD presented copy"))return;
+        m_amdPresentedCopy->SetName(L"AMD_Presented_Copy");
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+        srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels=1;
+        m_device->CreateShaderResourceView(m_amdPresentedCopy.Get(),&srv,SRVCPU(AmdPresentedSRV));
+        m_amdPresentedWidth=width;m_amdPresentedHeight=height;
+        m_amdPresentedValid=false;
+    }
+
+    // Its own allocation and list: the frame's list was closed before Present, and
+    // this must not disturb the capture ring's own slot accounting.
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> alloc;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+    if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&alloc)),
+           "Create the AMD presented-copy allocator"))return;
+    if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,alloc.Get(),nullptr,
+           IID_PPV_ARGS(&list)),"Create the AMD presented-copy list"))return;
+
+    Barrier(list.Get(),m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(list.Get(),m_amdPresentedCopy.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(m_amdPresentedCopy.Get(),m_backbuffers[bi].Get());
+    Barrier(list.Get(),m_amdPresentedCopy.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Barrier(list.Get(),m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PRESENT);
+
+    if(!DeviceHR(list->Close(),"Close the AMD presented-copy list"))return;
+    ID3D12CommandList*ls[]={list.Get()};
+    m_queue->ExecuteCommandLists(1,ls);
+    m_amdPresentedValid=true;
+}
 bool D3D12Renderer::DeviceHR(HRESULT hr,const char*what){
     if(SUCCEEDED(hr))return true;
     LOG(what<<" failed hr="<<HexText(hr));

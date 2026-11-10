@@ -816,7 +816,14 @@ private:
     static constexpr uint32_t NvofInputSRV = PqSourceSRV + 1;
     // The RTX VSR frame (t6): a null view until the first one is allocated.
     static constexpr uint32_t VsrSRV = NvofInputSRV + 4;
-    static constexpr uint32_t SRVCount = VsrSRV + 1;
+    // The frame the AMD add-on composited, taken from the swapchain backbuffer that
+    // was just presented. The NVIDIA path samples m_dlssOutput (slot 1) instead,
+    // because RenoDX runs the network inside EvaluateFeature and writes that
+    // resource. The AMD add-on runs it inside Present and draws into the backbuffer,
+    // so on that backend the presented image is the neural output and this slot is
+    // what the capture samples. Null on NVIDIA: nothing binds it there.
+    static constexpr uint32_t AmdPresentedSRV = VsrSRV + 1;
+    static constexpr uint32_t SRVCount = AmdPresentedSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -953,6 +960,8 @@ private:
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    // Copies the frame the AMD add-on composited, right after it is presented.
+    void RecordAmdPresentedCopy();
     D3D12_CPU_DESCRIPTOR_HANDLE RTV(uint32_t index) const;
     D3D12_CPU_DESCRIPTOR_HANDLE DSV() const;
     D3D12_CPU_DESCRIPTOR_HANDLE SRVCPU(uint32_t index) const;
@@ -1156,6 +1165,13 @@ private:
     // that question means "the neural path is armed", not "an NGX handle
     // exists".
     bool m_amdNeuralBackend = false;
+    // The backbuffer the AMD add-on composited into, kept from the present so the
+    // capture can read it. B8G8R8A8 is the swapchain format; the resource is
+    // created on first use at the swapchain's size and re-created on resize.
+    // Cleared by the capture once it has copied the frame out.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_amdPresentedCopy;
+    bool m_amdPresentedValid = false;
+    uint32_t m_amdPresentedWidth = 0, m_amdPresentedHeight = 0;
     bool m_requestedTearing = false;
     bool m_followWindow = false;
     static inline std::atomic<uint64_t> s_instances{0};

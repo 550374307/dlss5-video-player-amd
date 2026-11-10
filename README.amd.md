@@ -163,18 +163,23 @@ then encodes and copies the source audio through. A 140 s 4K film took about
 
 ## 8. Known limits
 
-- **Export and cache still fail.** The offline capture path reads the *NGX output
-  texture*, and the AMD add-on composites into the swapchain inside `Present`, so
-  the player has nothing to copy. The neural pass really runs and the picture really
-  changes; the player cannot yet collect it. `tools/amd/dlss5-amd-video.ps1` is the
-  way to get a file today.
+- **Export and cache are implemented but unverified.** The capture path now reads
+  the frame the AMD add-on composited (`RecordAmdPresentedCopy` copies the presented
+  backbuffer into a private texture that `AmdPresentedSRV` views), instead of the
+  NGX output texture that only exists on NVIDIA. It builds and the portable suites
+  pass, but the machine this was written on could not run it — see the next point —
+  so no AMD export has actually produced a file yet. `tools/amd/dlss5-amd-video.ps1`
+  is the verified way to get a file until someone confirms it on working hardware.
 - **Intermittent `amdhip64_7.dll +0x465007` crash on engine init.** Seen after
   several hundred sessions; a cold reboot clears it and `hipInfo` stays healthy
   throughout, so it reads as GPU-side state rather than this code. The same binary
   in the same directory produced 20 good frames minutes before it started failing
   100 % of the time.
 - No RTX VSR, no DLSS Super Resolution, no frame generation on AMD.
-- Upstream's 20 portable CTest suites have not been run against this fork.
+- Upstream's CTest suites: 19 of 20 pass. The one failure,
+  `NeuralPrerenderTests` ("Cache root probe fallback"), reproduces on an unmodified
+  upstream checkout on this machine, so it is environmental and not caused by the
+  AMD backend.
 - Only `gfx1101` has been exercised. `OtherAmd` is classified so the backend is
   reachable, but nothing claims RDNA2 or RDNA4 behave.
 

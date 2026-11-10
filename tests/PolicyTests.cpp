@@ -5720,7 +5720,17 @@ void gpu_classification_table_test()
         {0x10DE, L"NVIDIA RTX A4000", GpuGeneration::OtherRtx},
         {0x10DE, L"NVIDIA RTX 6000 Ada Generation", GpuGeneration::OtherRtx},
         {0x10DE, L"NVIDIA GeForce GTX 1660 SUPER", GpuGeneration::OtherNvidia},
-        {0x1002, L"AMD Radeon RX 7900 XTX", GpuGeneration::Unsupported},
+        // Radeon parts are no longer Unsupported: the AMD backend runs the neural
+        // pass through the OpenNR add-on and the danielblnc HIP runtime instead of
+        // NGX feature 18. The RX 7000 series is gfx1100/1101/1102, which is the one
+        // AMD generation verified on hardware here; anything else Radeon-shaped is
+        // OtherAmd, which is reachable but claims nothing.
+        {0x1002, L"AMD Radeon RX 7900 XTX", GpuGeneration::AmdRdna3},
+        {0x1002, L"AMD Radeon RX 7800 XT", GpuGeneration::AmdRdna3},
+        {0x1002, L"AMD Radeon RX 7600", GpuGeneration::AmdRdna3},
+        {0x1002, L"AMD Radeon RX 6900 XT", GpuGeneration::OtherAmd},
+        {0x1002, L"AMD Radeon RX 9070 XT", GpuGeneration::OtherAmd},
+        {0x1002, L"AMD Radeon(TM) Graphics", GpuGeneration::OtherAmd},
         {0x8086, L"Intel(R) Arc(TM) A770 Graphics", GpuGeneration::Unsupported},
         {0x10DE, L"", GpuGeneration::OtherNvidia},
         {0, L"GeForce RTX 5090", GpuGeneration::Unsupported},
