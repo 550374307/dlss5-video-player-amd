@@ -631,7 +631,17 @@ int wmain(int argc, wchar_t** argv)
     // held to requireNeural when they arrive.
     const bool neuralAddon =
         arguments->preflight || arguments->command != nullptr || arguments->request.requireNeural;
-    const ConfigUpdate config = ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", neuralAddon);
+    // On the AMD backend the add-on is amd-nr.addon64, which ReShade loads on its
+    // own and which this project never names in DisabledAddons. Running the NVIDIA
+    // contract here would write renodx-dlss5.addon64 into a folder that has no such
+    // file: harmless, since a name that matches nothing disables nothing, but it
+    // leaves a foreign entry in the user's INI and makes the helper exit once for a
+    // repair that repaired nothing. Skipped instead.
+    const bool amdBackend = AmdRuntimeStaged(moduleDirectory);
+    // ok, changed, previousAddonEnabled, addonEnabled, error
+    const ConfigUpdate config = amdBackend
+        ? ConfigUpdate{true, false, neuralAddon, neuralAddon, {}}
+        : ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", neuralAddon);
     if (!config.ok || config.addonEnabled != neuralAddon) {
         return fail(!config.error.empty() ? config.error
             : neuralAddon ? L"The helper-local neural add-on configuration was not enabled."
