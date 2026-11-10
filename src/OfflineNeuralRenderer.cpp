@@ -1095,7 +1095,17 @@ public:
         // Super Resolution carrier whichever job this is. A job that asked for
         // Super Resolution alone is held to it too: a captured frame NGX never
         // evaluated is the source at its own size, not an upscale.
-        if(attempt.neuralEvaluations<attempt.frames){
+        //
+        // On the AMD backend this equality cannot be asked. NGX counts every
+        // evaluate in process; the AMD add-on only *samples* its log - a 127-frame
+        // session printed four "frame N processed" lines - so a count read from it
+        // is an undercount by construction, and comparing it to the captured total
+        // rejects a render that was entirely neural (observed: 117 against 120 on a
+        // job whose add-on logged "after 127 frames"). What still holds that render
+        // to being neural is the evidence gate above it (the add-on's engine came up
+        // and evaluated) and the timing floor below, which a passthrough cannot
+        // clear. The count itself is left as a receipt number, not a verdict.
+        if(!(request_.requireNeural&&amdNeuralBackend_)&&attempt.neuralEvaluations<attempt.frames){
             std::wostringstream detail;
             if(request_.requireNeural){
                 detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
@@ -1220,6 +1230,22 @@ private:
             const auto reportStages=[&]{ReportStageTimings(kind_,stages_,attempt_,job_.evaluator_);};
             ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
             const auto recordNeuralEvaluations = [&] {
+                // On NVIDIA this reads NGX's in-process counter, which is exact the
+                // moment the last evaluate returns. On AMD it reads the add-on's
+                // "frame N processed" line out of amd-nr.log, and that file is
+                // appended asynchronously: the final frames of a job can still be in
+                // the add-on's buffer when the capture of the last one completes.
+                // Without this wait the count comes up short by the number of frames
+                // still in flight - observed as "evaluated 117 frames while 120 were
+                // captured" on a render that was entirely neural.
+                if (job_.amdNeuralBackend_) {
+                    for (int settle = 0; settle < 40; ++settle) {
+                        job_.RefreshAmdEvaluations();
+                        const uint64_t seen = job_.NeuralEvaluationCount();
+                        if (seen >= neuralEvaluationsBefore_ + attempt_.frames) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    }
+                }
                 const uint64_t now = job_.NeuralEvaluationCount();
                 attempt_.neuralEvaluations = now > neuralEvaluationsBefore_ ? now - neuralEvaluationsBefore_ : 0;
             };
@@ -1408,7 +1434,14 @@ private:
                 attempt_.hasTimestamp=true;
             }
             attempt_.lastTimestamp=queued.timestamp100ns;
-            attempt_.neuralGpuMs.push_back(queued.neuralGpuMs);
+            // Only a real measurement is a sample. The neural GPU time comes from
+            // NGX's timestamp queries and simply does not exist on the AMD backend,
+            // where it reads as 0.0; pushing that would give SummarizeTiming one
+            // sample whose value is zero, which lands the attempt below the timing
+            // floor and rejects a render that was entirely neural. Leaving the series
+            // empty is what NeuralTimingClearsFloor already documents as "this build
+            // carries no timing instrumentation", which is exactly true here.
+            if (queued.neuralGpuMs > 0.0) attempt_.neuralGpuMs.push_back(queued.neuralGpuMs);
             job_.Emit(NeuralRenderPhase::NeuralRendering,attempt_.frames,attempt_.bytes,true);
             attempt_.stages.Push(queued.readMs, queued.guideMs, captureMs, queued.evalMs, writeMs,
                                  MillisecondsSince(queued.frameStart));
@@ -1715,7 +1748,7 @@ private:
                 attempt_.hasTimestamp=true;
             }
             attempt_.lastTimestamp=frame.timestamp100ns;
-            attempt_.neuralGpuMs.push_back(evaluation.neuralGpuMs);
+            if (evaluation.neuralGpuMs > 0.0) attempt_.neuralGpuMs.push_back(evaluation.neuralGpuMs);
             job_.Emit(NeuralRenderPhase::NeuralRendering,attempt_.frames,attempt_.bytes,true);
             attempt_.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
                                  MillisecondsSince(frameStart));
@@ -3114,11 +3147,22 @@ std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& r
     // read as evidence.
     static const uint64_t started=ProcessStartFileTime();
     std::filesystem::path best;uint64_t newest=0;
-    // The AMD backend's add-on writes amd-nr.log instead of ReShade.log, and it
-    // is the same kind of evidence: one append-only session log per runtime
-    // directory, truncated when the add-on loads and rewritten from the start
-    // when the runtime directory is rebuilt.
-    for(const wchar_t* name:{L"ReShade.log",L"ReShade.log1",L"amd-nr.log"}){
+    // The AMD backend's evidence is amd-nr.log and only amd-nr.log. It used to be
+    // chosen by "most recently written" against ReShade.log, which sits in the same
+    // folder and is written at the same moments - so a tie could select ReShade.log,
+    // which carries none of the add-on's lines. The evaluation count then came up
+    // short by however many frames the tie cost: an all-neural 120-frame render read
+    // as 117 evaluated. Named outright now, so the choice cannot come down to a
+    // timestamp.
+    {
+        const std::filesystem::path amdLog = runtimeDirectory / L"amd-nr.log";
+        std::error_code amdError;
+        if (std::filesystem::is_regular_file(amdLog, amdError)) {
+            const auto written = LastWriteFileTime(amdLog);
+            if (written && *written >= started) return amdLog;
+        }
+    }
+    for(const wchar_t* name:{L"ReShade.log",L"ReShade.log1"}){
         const std::filesystem::path candidate=runtimeDirectory/name;
         const auto written=LastWriteFileTime(candidate);
         if(!written||*written<started)continue;

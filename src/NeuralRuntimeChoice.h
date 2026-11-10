@@ -52,13 +52,31 @@ struct Runtime {
 inline constexpr Runtime kCurrent{"310.9.16", L"nvngx_dlssnr.dll", "nvngx_dlssnr.dll", true};
 inline constexpr Runtime kPrevious{"310.8.SF-v2", L"310.8.SF-v2/nvngx_dlssnr.dll",
                                    "310.8.SF-v2\\nvngx_dlssnr.dll", false};
+// The AMD backend runs danielblnc's DLSS-NR build instead of an NVIDIA runtime
+// file, so its lock destination and version label are its own. networkB is false:
+// that build carries network A only, which is also what the add-on reports.
+inline constexpr Runtime kAmd{"opennr-0.7.15", L"dlssnr_amd_pass1.dll",
+                              "dlssnr_amd_pass1.dll", false};
 
 // Whether this GPU is offered 310.9.16 at all; where it is not, the choice of
 // runtime is not the user's and the dialog says so.
 inline bool OffersCurrent(GpuGeneration gpu) { return gpu == GpuGeneration::Rtx50Blackwell; }
 
+// True when neural rendering on this generation goes through the AMD backend.
+// Declared here rather than reached through RuntimePolicy.h so this header stays
+// dependency-free, and kept in step with IsAmdBackend there.
+inline bool IsAmdGeneration(GpuGeneration gpu)
+{
+    return gpu == GpuGeneration::AmdRdna3 || gpu == GpuGeneration::OtherAmd;
+}
+
 inline const Runtime& Select(GpuGeneration gpu, bool previousRequested)
 {
+    // The AMD set has one runtime, so "previous" means the same thing there. Naming
+    // it out of this function rather than leaving the NVIDIA pair in place is what
+    // stops the export path from demanding that the add-on log name
+    // nvngx_dlssnr.dll, which an AMD install does not have.
+    if (IsAmdGeneration(gpu)) return kAmd;
     return OffersCurrent(gpu) && !previousRequested ? kCurrent : kPrevious;
 }
 

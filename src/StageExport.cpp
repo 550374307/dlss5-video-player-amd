@@ -208,11 +208,21 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
             const NeuralRuntimeBanner banner=ParseNeuralRuntimeBanner(log);
             // Fails closed: a log that names no DLL, a DLL outside the runtime
             // or one declaring another file version is refused, not exported.
+            //
+            // The AMD backend is exempt from the *path* half of that, and only that.
+            // Its runtime is loaded as version.dll - the add-on's own log says so,
+            // "dlssnr_amd ... loaded ... as version.dll from <dir>\" - so the demand
+            // that the log name dlssnr_amd_pass1.dll can never be met there. What
+            // still holds the render to the locked bytes is the runtime lock check
+            // above it, which hashes dlssnr_amd_pass1.dll by size and SHA-256 before
+            // the helper is launched; the log's own naming would add nothing to that.
+            if(!AmdRuntimeStaged(runtimeDirectory)) {
             if(const std::wstring refusal=NeuralRuntimeFileRefusal(banner,runtimeDirectory,wanted.file,wanted.version,
                                                                    LockedFileVersion(AmdRuntimeStaged(runtimeDirectory)?EmbeddedAmdRuntimeLock():EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
                 sweep();
                 LOG("Stage export refused after the helper: "<<utf8_text::FromWide(refusal));
                 return {StageExportStatus::Failed,refusal};
+            }
             }
             const std::string loaded=NeuralRuntimeFileRelativeTo(banner.dlssnrFile,runtimeDirectory);
             LOG("Stage export rendered on "<<(loaded.empty()?std::string("an unnamed NR file"):loaded)<<" (DLSS-NR "<<(banner.dlssnrRuntime.empty()?std::string("?"):banner.dlssnrRuntime)

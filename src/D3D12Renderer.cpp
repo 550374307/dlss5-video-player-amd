@@ -1348,7 +1348,7 @@ bool D3D12Renderer::CreateVideoResources(){
     srv.Format=DXGI_FORMAT_R10G10B10A2_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(PqSourceSRV));
     // The RTX VSR frame is allocated when a comparison first shows one; never read
     // before that, because the flags the compositor tests are off.
-    srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(VsrSRV));
+    srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(VsrSRV));
 
     // Two timestamps per frame slot bracket DLSS Evaluate; resolved into a readback
     // buffer and harvested once that slot's fence is known complete.
@@ -2969,7 +2969,7 @@ bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
     if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&output)),"Create RTX VSR output"))return false;
     output->SetName(L"Vsr_Output_RGBA8_sRGB");
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
-    srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;m_device->CreateShaderResourceView(output.Get(),&srv,SRVCPU(VsrSRV));
+    srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;m_device->CreateShaderResourceView(output.Get(),&srv,SRVCPU(VsrSRV));
     m_vsrOutput=std::move(output);m_vsrOutputW=width;m_vsrOutputH=height;m_vsrOutputInUAV=true;
     // A new texture holds nothing yet, whatever the reference is.
     m_vsrSerial=UINT64_MAX;
@@ -3122,7 +3122,17 @@ void D3D12Renderer::RecordAmdPresentedCopy(){
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width=width;desc.Height=height;desc.DepthOrArraySize=1;desc.MipLevels=1;
-        desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;
+        // FP16, not BGRA8. The capture samples this through PSPresent, which reads
+        // .rgb and treats it as linear light - that is what NGX's m_dlssOutput holds
+        // on NVIDIA. Copying the 8-bit sRGB backbuffer straight in made every value
+        // be taken as linear: red 252,0,0 came back as a blue-purple wash at 4.6 dB.
+        // The conversion happens in the shader below.
+        // The backbuffer is DXGI_FORMAT_R8G8B8A8_UNORM (see the swapchain desc), and
+        // CopyResource requires both sides to be the same format. Using
+        // B8G8R8A8_UNORM here did not fail the copy - D3D12 permits it for these two
+        // - but it reinterpreted the bytes: red 252,0,0 came back as 40,42,255, a
+        // blue where the picture had red, and the whole frame inverted at 4.5 dB.
+        desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;
         desc.Flags=D3D12_RESOURCE_FLAG_NONE;
         auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
         m_amdPresentedCopy.Reset();
@@ -3131,7 +3141,10 @@ void D3D12Renderer::RecordAmdPresentedCopy(){
                IID_PPV_ARGS(&m_amdPresentedCopy)),"Create the AMD presented copy"))return;
         m_amdPresentedCopy->SetName(L"AMD_Presented_Copy");
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+        // _SRGB so the sampler decodes to linear light, which is the space PSPresent
+        // expects - on NVIDIA it reads NGX's FP16 output. The bytes stay 8-bit and the
+        // copy stays a plain CopyResource.
+        srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels=1;
