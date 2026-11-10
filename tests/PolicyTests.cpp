@@ -2285,6 +2285,18 @@ void start_screen_reports_the_amd_backend_instead_of_failing_the_gpu_test()
     // helper is the only thing that runs the network.
     CHECK(!OfferSafeMode(lines, false));
 
+    // RTX VSR and Frame Generation are NVIDIA's. The capability lines carry no VSR
+    // row for VsrState::Unknown, and an AMD build sets that so a Radeon is not told
+    // its nvngx_vsr.dll is missing.
+    Facts vsrFacts{};
+    vsrFacts.gpu = L"AMD Radeon RX 7800 XT";
+    vsrFacts.generation = GpuGeneration::AmdRdna3;
+    vsrFacts.driverVersion = L"32.0.31021.6002";
+    vsrFacts.runtime = RuntimeState::Verified;
+    vsrFacts.rtxVsr = VsrState::Unknown;
+    for (const auto& line : CapabilityLines(vsrFacts))
+        CHECK(line.label != L"RTX VSR");
+
     // An unmeasured Radeon is still the AMD backend, not an unsupported GPU.
     facts.generation = GpuGeneration::OtherAmd;
     CHECK(CapabilityLines(facts)[0].mark == Mark::Pass);

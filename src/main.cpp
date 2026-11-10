@@ -8912,7 +8912,11 @@ private:
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
         if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;facts.frameGenAddonLossy=framegen_addon::LossyNote(FrameGenAddonState().settings);}
-        facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
+        // RTX VSR is NVIDIA's, so on the AMD backend the line is left out entirely
+        // rather than reporting its DLL as missing: that DLL is never installed
+        // beside a Radeon and the "missing" reading would look like a broken setup.
+        facts.rtxVsr=IsAmdBackend(m_opt.detectedGpu.generation)?start_screen::VsrState::Unknown
+                    :!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
                     :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
                     :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
         {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
