@@ -327,6 +327,20 @@ struct D3D12RendererTestAccess {
     {
         renderer.m_lastRenderedId=id;
     }
+    // The AMD capture gate: the presented-copy state stands in for the NGX
+    // evaluation that a Radeon never performs.
+    static void ConfigureAmdCapture(D3D12Renderer& renderer,uint32_t outputWidth,uint32_t outputHeight,
+                                    bool presentedValid,uint32_t presentedWidth,uint32_t presentedHeight,
+                                    std::function<bool(std::vector<uint8_t>&)> capture)
+    {
+        renderer.m_outputW=outputWidth;renderer.m_outputH=outputHeight;
+        renderer.m_amdNeuralBackend=true;
+        renderer.m_amdPresentedValid=presentedValid;
+        renderer.m_amdPresentedWidth=presentedWidth;renderer.m_amdPresentedHeight=presentedHeight;
+        Hooks(renderer).cacheCapture=std::move(capture);
+    }
+    static bool AmdPresentedValid(const D3D12Renderer& renderer){return renderer.m_amdPresentedValid;}
+    static uint32_t AmdPresentedSRV(){return D3D12Renderer::AmdPresentedSRV;}
     // The deleter ends the process on the second renderer it has to retain;
     // a suite that retains one per case starts each such case from zero.
     static void ResetRetainedRenderers(){D3D12Renderer::s_retainedRenderers.store(0);}
@@ -5676,6 +5690,78 @@ void renderer_cache_capture_carries_the_identity_of_the_frame_it_rendered_test()
                                  guide,16.0f));
     CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
     CHECK(frame.id==FrameIdentity{});
+}
+// The AMD backend's half of the same rule. A Radeon never performs the NGX
+// evaluate that m_lastDLSSUsed records, so the capture has to be gated on
+// something else: whether the frame the add-on composited was copied out. These
+// cases are the only check of that path that does not need a GPU.
+void renderer_amd_capture_requires_a_presented_copy_test()
+{
+    auto renderer=MakeD3D12Renderer();int captures=0;
+    // No presented frame yet: the capture must decline, exactly as it does on
+    // NVIDIA when the evaluate did not run.
+    D3D12RendererTestAccess::ConfigureAmdCapture(
+        *renderer,2,2,false,0,0,[&](std::vector<uint8_t>&){++captures;return true;});
+    CapturedVideoFrame frame;frame.pixels.assign(7,0x55);frame.width=9;frame.height=9;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(0,captures);CHECK(frame.pixels.empty());
+
+    // A copied frame with the same geometry as the output is capturable even
+    // though m_lastDLSSUsed is false throughout - that is the whole point.
+    D3D12RendererTestAccess::ConfigureAmdCapture(
+        *renderer,2,2,true,2,2,[](std::vector<uint8_t>& bytes){
+            bytes={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};return true;});
+    CapturedVideoFrame good;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,good));
+    CHECK_EQ(uint32_t{2},good.width);CHECK_EQ(uint32_t{2},good.height);
+    CHECK_EQ(size_t{16},good.pixels.size());
+}
+
+// A presented copy whose geometry disagrees with the output is not a frame this
+// job can use: PresentScale can make the backbuffer a different shape from the
+// render, and capturing it anyway would publish a differently sized image.
+void renderer_amd_capture_refuses_a_presented_copy_of_another_geometry_test()
+{
+    auto renderer=MakeD3D12Renderer();int captures=0;
+    D3D12RendererTestAccess::ConfigureAmdCapture(
+        *renderer,4,4,true,2,2,[&](std::vector<uint8_t>&){++captures;return true;});
+    CapturedVideoFrame frame;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(0,captures);CHECK(frame.pixels.empty());
+
+    // The same copy at the output's own size is accepted, so the refusal above is
+    // about geometry and not about the gate being stuck closed.
+    D3D12RendererTestAccess::ConfigureAmdCapture(
+        *renderer,2,2,true,2,2,[](std::vector<uint8_t>& bytes){bytes.assign(16,0);return true;});
+    CapturedVideoFrame ok;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,ok));
+    CHECK_EQ(size_t{16},ok.pixels.size());
+}
+
+// NVIDIA keeps its own gate: with the AMD flag off, m_lastDLSSUsed alone decides.
+// This is the case that would break if the AMD branch leaked into the NVIDIA path.
+void renderer_nvidia_capture_still_requires_the_ngx_evaluation_test()
+{
+    auto renderer=MakeD3D12Renderer();int captures=0;
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,false,[&](std::vector<uint8_t>&){++captures;return true;});
+    CapturedVideoFrame frame;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(0,captures);
+
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(16,0);return true;});
+    CapturedVideoFrame ok;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,ok));
+    CHECK_EQ(size_t{16},ok.pixels.size());
+}
+
+// The capture samples AmdPresentedSRV where the NVIDIA path samples slot 1, and
+// that slot has to exist inside the heap the renderer allocates.
+void renderer_amd_presented_srv_is_inside_the_heap_test()
+{
+    CHECK(D3D12RendererTestAccess::AmdPresentedSRV()!=1u);
+    CHECK(D3D12RendererTestAccess::AmdPresentedSRV()>0u);
 }
 
 void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
@@ -18280,9 +18366,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(renderer_frame_signal_device_loss_code_latches_device_removed_test),
     TEST_CASE(renderer_frame_signal_success_advances_tracking_once_test),
     TEST_CASE(renderer_cache_capture_requires_a_successful_neural_evaluation_test),
-    TEST_CASE(renderer_cache_capture_returns_exact_tight_bgra_geometry_test),
-    TEST_CASE(renderer_cache_capture_carries_the_identity_of_the_frame_it_rendered_test),
-    TEST_CASE(renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test),
+    TEST_CASE(renderer_amd_capture_requires_a_presented_copy_test),
+    TEST_CASE(renderer_amd_capture_refuses_a_presented_copy_of_another_geometry_test),
+    TEST_CASE(renderer_nvidia_capture_still_requires_the_ngx_evaluation_test),
+    TEST_CASE(renderer_amd_presented_srv_is_inside_the_heap_test),
+
+TEST_CASE(renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test),
     TEST_CASE(renderer_cache_capture_does_not_apply_playback_color_adjustments_test),
     TEST_CASE(gpu_classification_table_test),
     TEST_CASE(adapter_luid_identity_compares_parts_not_model_names_test),

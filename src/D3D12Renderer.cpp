@@ -2210,7 +2210,12 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     // evidence receipt loop can resubmit. On AMD there is no NGX evaluate to have
     // succeeded, so the equivalent fact is that the presented frame was copied.
     if(m_amdNeuralBackend){
+        // The geometry check matters as much as the flag: PresentScale can leave a
+        // presented copy that is valid but a different shape from the output, and
+        // capturing it would publish a differently sized image under this frame's
+        // identity.
         if(!m_amdPresentedValid||!m_amdPresentedWidth||!m_amdPresentedHeight)return false;
+        if(m_amdPresentedWidth!=m_outputW||m_amdPresentedHeight!=m_outputH)return false;
     } else if(!m_lastDLSSUsed||!m_outputW||!m_outputH)
         return false;
     // Whatever the active capture format produces, not four bytes per pixel: an NV12
@@ -2256,7 +2261,8 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // to capture". On the AMD backend the evaluate never runs - the add-on runs the
     // network inside Present - and the equivalent fact is that the presented frame
     // was copied out below.
-    if(m_amdNeuralBackend?(!m_amdPresentedValid||!m_amdPresentedWidth||!m_amdPresentedHeight)
+    if(m_amdNeuralBackend?(!m_amdPresentedValid||!m_amdPresentedWidth||!m_amdPresentedHeight||
+                           m_amdPresentedWidth!=m_outputW||m_amdPresentedHeight!=m_outputH)
                         :(!m_lastDLSSUsed||!m_outputW||!m_outputH))return false;
     if(m_capturePending>=CaptureSlots)return false;
     const bool planar=d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat);
