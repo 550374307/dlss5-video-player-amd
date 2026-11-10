@@ -168,6 +168,18 @@ D3D12Renderer::~D3D12Renderer() {
     m_dlss.Shutdown();
     LOG("Renderer teardown: NGX released");
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
+    // The AMD presented-copy pair. Waited out first: the queue may still be reading
+    // what these name, and the device goes away right after this.
+    if (m_amdCopyFence && m_amdCopyFenceValue &&
+        m_amdCopyFence->GetCompletedValue() < m_amdCopyFenceValue && m_amdCopyEvent) {
+        if (SUCCEEDED(m_amdCopyFence->SetEventOnCompletion(m_amdCopyFenceValue, m_amdCopyEvent)))
+            WaitForSingleObject(m_amdCopyEvent, 5000);
+    }
+    m_amdCopyList.Reset();
+    m_amdCopyAllocator.Reset();
+    m_amdCopyFence.Reset();
+    m_amdPresentedCopy.Reset();
+    if (m_amdCopyEvent) { CloseHandle(m_amdCopyEvent); m_amdCopyEvent = nullptr; }
 }
 
 bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource,bool captureOutput) {
@@ -3124,22 +3136,46 @@ void D3D12Renderer::RecordAmdPresentedCopy(){
 
     // Its own allocation and list: the frame's list was closed before Present, and
     // this must not disturb the capture ring's own slot accounting.
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> alloc;
-    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
-    if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&alloc)),
-           "Create the AMD presented-copy allocator"))return;
-    if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,alloc.Get(),nullptr,
-           IID_PPV_ARGS(&list)),"Create the AMD presented-copy list"))return;
+    // One persistent pair, reused. The previous use is waited on, not just queued:
+    // releasing a command list straight after ExecuteCommandLists leaves the GPU
+    // reading an object the CPU has already dropped, and resetting the allocator
+    // under a finished-but-unretired list is the same mistake in another place.
+    if(!m_amdCopyAllocator||!m_amdCopyList||!m_amdCopyFence){
+        if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+               IID_PPV_ARGS(&m_amdCopyAllocator)),"Create the AMD presented-copy allocator"))return;
+        if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,
+               m_amdCopyAllocator.Get(),nullptr,IID_PPV_ARGS(&m_amdCopyList)),
+               "Create the AMD presented-copy list"))return;
+        if(!HR(m_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&m_amdCopyFence)),
+               "Create the AMD presented-copy fence"))return;
+        if(!m_amdCopyEvent){
+            m_amdCopyEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+            if(!m_amdCopyEvent)return;
+        }
+        m_amdCopyFenceValue=0;
+        // The list is created open; the first recording closes it below.
+    }
+    if(m_amdCopyFenceValue){
+        if(m_amdCopyFence->GetCompletedValue()<m_amdCopyFenceValue){
+            if(FAILED(m_amdCopyFence->SetEventOnCompletion(m_amdCopyFenceValue,m_amdCopyEvent)))return;
+            if(WaitForSingleObject(m_amdCopyEvent,5000)!=WAIT_OBJECT_0)return;
+        }
+        if(!HR(m_amdCopyAllocator->Reset(),"Reset the AMD presented-copy allocator"))return;
+        if(!HR(m_amdCopyList->Reset(m_amdCopyAllocator.Get(),nullptr),
+               "Reset the AMD presented-copy list"))return;
+    }
 
-    Barrier(list.Get(),m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_COPY_SOURCE);
-    Barrier(list.Get(),m_amdPresentedCopy.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
-    list->CopyResource(m_amdPresentedCopy.Get(),m_backbuffers[bi].Get());
-    Barrier(list.Get(),m_amdPresentedCopy.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Barrier(list.Get(),m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PRESENT);
+    Barrier(m_amdCopyList.Get(),m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(m_amdCopyList.Get(),m_amdPresentedCopy.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+    m_amdCopyList->CopyResource(m_amdPresentedCopy.Get(),m_backbuffers[bi].Get());
+    Barrier(m_amdCopyList.Get(),m_amdPresentedCopy.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Barrier(m_amdCopyList.Get(),m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PRESENT);
 
-    if(!DeviceHR(list->Close(),"Close the AMD presented-copy list"))return;
-    ID3D12CommandList*ls[]={list.Get()};
+    if(!DeviceHR(m_amdCopyList->Close(),"Close the AMD presented-copy list"))return;
+    ID3D12CommandList*ls[]={m_amdCopyList.Get()};
     m_queue->ExecuteCommandLists(1,ls);
+    // The fence is what makes the next reuse and the capture's own read safe.
+    if(FAILED(m_queue->Signal(m_amdCopyFence.Get(),++m_amdCopyFenceValue)))return;
     m_amdPresentedValid=true;
 }
 bool D3D12Renderer::DeviceHR(HRESULT hr,const char*what){

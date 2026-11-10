@@ -1172,6 +1172,15 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_amdPresentedCopy;
     bool m_amdPresentedValid = false;
     uint32_t m_amdPresentedWidth = 0, m_amdPresentedHeight = 0;
+    // One persistent pair for that copy. Creating them per frame churned the D3D12
+    // object graph for no reason and, worse, let the list be released right after
+    // ExecuteCommandLists had only queued it. Reused instead, with a fence so the
+    // previous use has finished before the allocator is reset.
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_amdCopyAllocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_amdCopyList;
+    Microsoft::WRL::ComPtr<ID3D12Fence> m_amdCopyFence;
+    HANDLE m_amdCopyEvent = nullptr;
+    uint64_t m_amdCopyFenceValue = 0;
     bool m_requestedTearing = false;
     bool m_followWindow = false;
     static inline std::atomic<uint64_t> s_instances{0};
