@@ -106,19 +106,36 @@ function Get-Remote([string]$Url, [string]$OutFile) {
 }
 
 function Expand-Member([string]$Archive, [string]$Member, [string]$OutFile, [string]$Extractor) {
-    # ReShade ships its proxy DLLs inside a self-extracting installer that is really
-    # a ZIP container; the member is lifted out without running anything.
-    if ($Extractor -eq 'zip') {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
+    # ReShade ships its proxy DLLs inside a self-extracting installer. Its ZIP
+    # central directory does not agree with the end-of-central-directory record, so
+    # .NET's ZipFile refuses it (GetEntry throws, Entries reads as empty) even though
+    # the bytes are a readable archive. bsdtar, which Windows ships in System32, opens
+    # it fine - the same route tools\fetch_neural_runtime.ps1 takes for this file.
+    if ($Extractor -eq 'zip') { $Extractor = 'tar' }
+    if ($Extractor -eq 'tar') {
+        $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+        if (-not (Test-Path -LiteralPath $tar)) {
+            throw "bsdtar is required to open '$Archive' and was not found at '$tar'."
+        }
+        $scratch = Join-Path (Split-Path -Parent $OutFile) ('extract-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scratch | Out-Null
         try {
-            $entry = $zip.Entries | Where-Object { $_.Name -eq $Member } | Select-Object -First 1
-            if (-not $entry) { throw "$Member not found in the ReShade installer" }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $OutFile, $true)
-        } finally { $zip.Dispose() }
+            & $tar -xf $Archive -C $scratch $Member
+            if ($LASTEXITCODE -ne 0) { throw "bsdtar could not extract $Member from '$Archive' (exit $LASTEXITCODE)." }
+            $produced = Join-Path $scratch $Member
+            if (-not (Test-Path -LiteralPath $produced)) { throw "$Member was not produced by bsdtar." }
+            Move-Item -LiteralPath $produced -Destination $OutFile -Force
+        } finally {
+            Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        }
         return
     }
-    throw "unknown extractor $Extractor"
+    $archive = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $zipEntry = $archive.GetEntry($Member)
+        if (-not $zipEntry) { throw "$Member is missing from '$Archive'." }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($zipEntry, $OutFile, $true)
+    } finally { $archive.Dispose() }
 }
 
 New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
