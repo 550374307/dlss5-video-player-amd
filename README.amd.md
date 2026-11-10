@@ -57,9 +57,10 @@ worker still presents every frame — the same mechanism, different runtime.
 | `src/RuntimeLockData.h.in`, `CMakeLists.txt` | embed the AMD lock at configure time |
 | `src/NeuralPreflight.h/.cpp` | `AmdLockedRuntimeFileNames()` (weights included: swapping them changes the picture, so they belong in the render identity) |
 | `src/NeuralPreflightProbe.cpp` | AMD preflight branch: run frames, read the add-on's own evidence, never ask NVIDIA's driver floor; `NeuralPreflightCause::AmdRuntimeFailed` |
-| `src/NeuralWorkerMain.cpp` | unlocked-module check and runtime stamps pick the lock by backend |
+| `src/NeuralWorkerMain.cpp` | unlocked-module check and runtime stamps pick the lock by backend; the NVIDIA add-on contract in `DisabledAddons` is skipped on AMD |
 | `src/StageExport.cpp` | export-time runtime refusal picks the lock by backend |
-| `src/D3D12Renderer.h` | `SetAmdNeuralBackend()`; `DLSSFeatureCreated()` answers for it |
+| `src/StartScreenPolicy.h` | the start screen reports the AMD backend and says the driver floor does not apply, instead of "not an RTX GPU, so no DLSS" and "needs 610.47 or newer" |
+| `src/D3D12Renderer.h/.cpp` | `SetAmdNeuralBackend()`; `DLSSFeatureCreated()` answers for it; `RecordAmdPresentedCopy` and `AmdPresentedSRV` are the capture's view of the presented frame |
 | `src/OfflineNeuralRenderer.cpp` | evidence source, log path, per-frame counter and failure vocabulary all branch on the backend |
 | `tools/amd/fetch_amd_runtime.ps1` | fetch and verify the AMD runtime set |
 | `tools/amd/dlss5-amd-video.ps1` | direct video processing through DLSS-NR, no player |
@@ -175,11 +176,15 @@ then encodes and copies the source audio through. A 140 s 4K film took about
   throughout, so it reads as GPU-side state rather than this code. The same binary
   in the same directory produced 20 good frames minutes before it started failing
   100 % of the time.
-- No RTX VSR, no DLSS Super Resolution, no frame generation on AMD.
+- No RTX VSR, no DLSS Super Resolution, no frame generation on AMD. The convert
+  probe says so: `sr_engines=none`, `stages=nr,fg`. Earlier builds of this branch
+  advertised `sr_engines=dlss` on a Radeon, which would have offered a stage whose
+  engine cannot start.
 - Upstream's CTest suites: 19 of 20 pass. The one failure,
   `NeuralPrerenderTests` ("Cache root probe fallback"), reproduces on an unmodified
   upstream checkout on this machine, so it is environmental and not caused by the
-  AMD backend.
+  AMD backend. Four AMD-specific cases were added to `PolicyTests` and all five of
+  the start-screen and capture gates they cover run without a GPU.
 - Only `gfx1101` has been exercised. `OtherAmd` is classified so the backend is
   reachable, but nothing claims RDNA2 or RDNA4 behave.
 
