@@ -166,13 +166,29 @@ then encodes and copies the source audio through. A 140 s 4K film took about
 
 ## 8. Known limits
 
-- **Export and cache are implemented but unverified.** The capture path now reads
-  the frame the AMD add-on composited (`RecordAmdPresentedCopy` copies the presented
-  backbuffer into a private texture that `AmdPresentedSRV` views), instead of the
-  NGX output texture that only exists on NVIDIA. It builds and the portable suites
-  pass, but the machine this was written on could not run it — see the next point —
-  so no AMD export has actually produced a file yet. `tools/amd/dlss5-amd-video.ps1`
-  is the verified way to get a file until someone confirms it on working hardware.
+- **Export and cache work, verified on hardware.** `dlss5-convert --stages nr` over a
+  120-frame 720p clip exits 0 and writes the file with its audio, and the exported
+  frame carries red as red, green as green, blue as blue.
+
+  The capture reads the frame the add-on composited: `RecordAmdPresentedCopy` copies
+  the presented backbuffer into a private texture that `AmdPresentedSRV` views, in
+  place of the NGX output texture that only exists on NVIDIA.
+
+  Getting there took five fixes that only became visible one after another — the
+  evaluation-count equality (the add-on *samples* its log, so 117 of 120 was a
+  counting artefact, not a passthrough), the neural-timing floor (NGX timestamp
+  queries do not exist on AMD, so a 0.0 read became a zero sample), the runtime
+  choice (no AMD entry meant the export demanded `nvngx_dlssnr.dll`), the log's own
+  naming (the runtime loads as `version.dll`, so the path check could never pass —
+  the lock that hashes `dlssnr_amd_pass1.dll` before launch still runs), and the
+  colour (the copy was `B8G8R8A8` against an `R8G8B8A8` backbuffer, which
+  `CopyResource` accepted and reinterpreted: red `252,0,0` came back as `40,42,255`,
+  4.5 dB; matching the format and viewing it as `_SRGB` gave 14.4 dB).
+
+  The frame still differs from the source across 100% of pixels — that is the
+  network's edit, not a passthrough. Solid patches after export: red `253,0,0` →
+  `253,18,65`, green `0,254,0` → `62,200,59`, blue `0,0,254` → `0,12,253`; channels
+  in order, the shifts are the tone adjustment.
 - **`amdhip64_7.dll +0x465007` faults on engine init when the GPU is idle.**
   This one had a long false trail — a stale directory, then uptime — and the control
   that settles it is concurrency: with the video pipeline running in the background,
