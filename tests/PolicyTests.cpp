@@ -2260,6 +2260,40 @@ void taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test()
         for (const auto& button : *bar) CHECK(localizer.Get(button.tipKey) != button.tipKey);
 }
 
+// A Radeon must not be reported as "not an RTX GPU, so no DLSS" any more, and its
+// DXGI version string must not be judged against the NVIDIA driver floor - which is
+// what produced "needs 610.47 or newer" for a card with no NVIDIA driver at all.
+void start_screen_reports_the_amd_backend_instead_of_failing_the_gpu_test()
+{
+    using namespace start_screen;
+    Facts facts{};
+    facts.gpu = L"AMD Radeon RX 7800 XT";
+    facts.generation = GpuGeneration::AmdRdna3;
+    facts.driverVersion = L"32.0.31021.6002";
+    facts.runtime = RuntimeState::Verified;
+    facts.runtimeVersion = L"opennr-0.7.15";
+    const auto lines = CapabilityLines(facts);
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0].mark == Mark::Pass);
+    CHECK(lines[0].value.find(L"AMD backend") != std::wstring::npos);
+    CHECK(lines[0].value.find(L"not an RTX") == std::wstring::npos);
+    // The driver line says the floor does not apply and does not fail.
+    CHECK(lines[1].mark == Mark::Pass);
+    CHECK(lines[1].value.find(L"610.47") == std::wstring::npos);
+    CHECK(lines[1].value.find(L"does not apply") != std::wstring::npos);
+    // Nothing asks for safe mode: safe mode skips the neural helper, and on AMD the
+    // helper is the only thing that runs the network.
+    CHECK(!OfferSafeMode(lines, false));
+
+    // An unmeasured Radeon is still the AMD backend, not an unsupported GPU.
+    facts.generation = GpuGeneration::OtherAmd;
+    CHECK(CapabilityLines(facts)[0].mark == Mark::Pass);
+    // An Intel card keeps the old verdict.
+    facts.generation = GpuGeneration::Unsupported;
+    facts.gpu = L"Intel(R) Arc(TM) A770 Graphics";
+    CHECK(CapabilityLines(facts)[0].mark == Mark::Fail);
+}
+
 void start_screen_checks_say_what_passed_and_what_failed_test()
 {
     using namespace start_screen;
@@ -18198,6 +18232,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
+    TEST_CASE(start_screen_reports_the_amd_backend_instead_of_failing_the_gpu_test),
     TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
     TEST_CASE(start_screen_names_a_loaded_frame_generation_addon_test),
     TEST_CASE(render_cache_revision_is_a_release_no_later_than_this_one_test),

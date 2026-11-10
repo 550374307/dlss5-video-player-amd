@@ -1757,7 +1757,12 @@ static SuperResolutionEngine ReadSuperResolutionEngine(const std::filesystem::pa
 // false, which the code analyzer rejects (C6237) as a condition never evaluated.
 static bool VsrExportReady(const std::filesystem::path& helpers,GpuGeneration generation){
     if constexpr(!VsrEngine::kBuilt)return false;
-    else return generation!=GpuGeneration::Unsupported&&generation!=GpuGeneration::OtherNvidia&&
+    // RTX VSR is NVIDIA's. The gate used to be "not Unsupported and not OtherNvidia",
+    // which was the same set as "is an RTX" while every Radeon was Unsupported;
+    // now that AMD has its own generations they have to be excluded by name or the
+    // export would offer a stage whose engine cannot start.
+    else return !IsAmdBackend(generation)&&generation!=GpuGeneration::Unsupported&&
+                generation!=GpuGeneration::OtherNvidia&&
                 framegen_addon::RegularFile(helpers/L"nvngx_vsr.dll");
 }
 

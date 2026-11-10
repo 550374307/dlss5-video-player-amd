@@ -78,12 +78,25 @@ inline std::wstring FpsText(double fps)
 inline std::vector<Line> CapabilityLines(const Facts& facts)
 {
     std::vector<Line> lines;
-    const bool rtx = facts.generation != GpuGeneration::Unsupported && facts.generation != GpuGeneration::OtherNvidia;
+    // "Not Unsupported and not OtherNvidia" used to mean "is an RTX", because every
+    // Radeon was Unsupported. AMD has its own generations now, so the AMD ones are
+    // named: they run the neural pass through a different backend and must not be
+    // reported as "not an RTX GPU, so no DLSS".
+    const bool amd = IsAmdBackend(facts.generation);
+    const bool rtx = !amd && facts.generation != GpuGeneration::Unsupported &&
+                     facts.generation != GpuGeneration::OtherNvidia;
     lines.push_back(Line{L"GPU", facts.gpu.empty() ? L"No NVIDIA GPU found" :
-                         rtx ? facts.gpu : facts.gpu + L" · not an RTX GPU, so no DLSS",
-                         rtx ? Mark::Pass : Mark::Fail});
+                         amd ? facts.gpu + L" · AMD backend (OpenNR + HIP runtime)"
+                             : rtx ? facts.gpu : facts.gpu + L" · not an RTX GPU, so no DLSS",
+                         (rtx || amd) ? Mark::Pass : Mark::Fail});
     const std::wstring floor = FormatNvidiaDriverVersion(kNeuralDriverFloor);
-    if (const auto version = ParseNvidiaDriverVersion(facts.driverVersion)) {
+    if (amd) {
+        // The driver floor is where NVIDIA's NGX core creates feature 18. A Radeon
+        // never does, and its DXGI version string is not an NVIDIA driver version,
+        // so judging it against 610.47 would report a healthy card as failing.
+        lines.push_back(Line{L"Driver", facts.driverVersion + L" · the NVIDIA floor does not apply to the AMD backend",
+                             Mark::Pass});
+    } else if (const auto version = ParseNvidiaDriverVersion(facts.driverVersion)) {
         const bool meets = !(*version < kNeuralDriverFloor);
         // 621.01 on an RTX 50 (P1.49): Info, never Fail - the freeze is in
         // presentation, so nothing is refused and safe mode would not help.
