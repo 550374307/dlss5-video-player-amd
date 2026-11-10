@@ -173,19 +173,27 @@ then encodes and copies the source audio through. A 140 s 4K film took about
   pass, but the machine this was written on could not run it — see the next point —
   so no AMD export has actually produced a file yet. `tools/amd/dlss5-amd-video.ps1`
   is the verified way to get a file until someone confirms it on working hardware.
-- **Intermittent `amdhip64_7.dll +0x465007` crash on engine init, and it gets worse
-  the longer the machine is up.** A newly launched process does work — processing a
-  video ran four consecutive 60-frame segments at 384–476 ms/frame with the runtime
-  logging `warm-up: first network run took 160 ms` and `network kernels: register
-  kernels, RDNA3 build`. Minutes later the same directory failed 5 out of 5 times,
-  as did a byte-identical copy, fresh directories, and frames that had just worked.
-  `hipInfo` reports gfx1101 and 15.98 GB throughout, VRAM was 4.1 GB of 16 GB before
-  a failing run, and no TDR appears in the event log.
+- **`amdhip64_7.dll +0x465007` faults on engine init when the GPU is idle.**
+  This one had a long false trail — a stale directory, then uptime — and the control
+  that settles it is concurrency: with the video pipeline running in the background,
+  three consecutive manual invocations in the same directory all succeeded
+  (27.999 / 22.608 / 22.964 ms per frame, exit 0). Seconds after that script exits, the
+  identical command fails with no reboot and no file change — only the GPU going idle.
 
-  What was ruled out: the NVIDIA `nvngx_dlssnr.dll` beside the runtime, `Scale`
-  (0.75 vs 1.0), `InlineWaitMs` (100 vs 200), frame content and size, residual dump
-  files, and VRAM exhaustion. The remaining explanation is that engine init degrades
-  within a single Windows boot; a cold reboot is the test. Tracked in issue #3.
+  That explains the rest: the video pipeline works end to end (4, 6 and 12 consecutive
+  segments at 166–476 ms/frame) because it keeps the GPU busy, while a lone probe
+  always initialises from idle. Engine init calls into `amdhip64_7.dll` and faults at
+  `+0x465007` before any frame runs (`last job -1`).
+
+  Ruled out by experiment: the NVIDIA `nvngx_dlssnr.dll` beside the runtime, `Scale`
+  0.75 vs 1.0, `InlineWaitMs` 100 vs 200, frame content and size, 2.7 GB of residual
+  dumps, VRAM (4.1 GB of 16 GB in use), an artificial `ffmpeg` decode load, and
+  inter-process delay (0 s and 15 s both fail). Tracked in issue #3.
+
+  **Practical consequence:** `tools/amd/dlss5-amd-video.ps1` is reliable because it
+  holds the GPU for the length of a run. Anything that starts the runtime from an idle
+  desktop — including the player's own export — can hit this, so if an export fails
+  immediately, run something GPU-heavy alongside it and try again.
 - No RTX VSR, no DLSS Super Resolution, no frame generation on AMD. The convert
   probe says so: `sr_engines=none`, `stages=nr,fg`. Earlier builds of this branch
   advertised `sr_engines=dlss` on a Radeon, which would have offered a stage whose

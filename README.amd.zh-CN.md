@@ -140,17 +140,25 @@ powershell -ExecutionPolicy Bypass -File tools\amd\dlss5-amd-video.ps1 `
   不再读只存在于 N 卡的 NGX 输出纹理。它能编译、可移植单测也过，但写这份代码的机器
   跑不起来 —— 见下一条 —— 所以**还没有任何一次 AMD 导出真的产出过文件**。
   在有人于可用硬件上确认之前，`tools/amd/dlss5-amd-video.ps1` 是**已验证可用**的出片方式。
-- **`amdhip64_7.dll +0x465007` 在引擎初始化时崩溃，而且开机越久越糟。**
-  新启动的进程是能用的 —— 跑视频时连续 4 个 60 帧分段，384–476 ms/帧，
-  运行时日志有 `warm-up: first network run took 160 ms` 和
-  `network kernels: register kernels, RDNA3 build`。几分钟后同一个目录 5/5 全崩，
-  字节相同的副本也崩，全新目录也崩，刚才还能跑的帧现在也崩。
-  全程 `hipInfo` 正常报 gfx1101 / 15.98 GB，崩之前 VRAM 只占 4.1 GB / 16 GB，
-  事件日志里没有 TDR。
+- **`amdhip64_7.dll +0x465007`：GPU 空闲时引擎初始化崩溃。**
+  这条走了很长的弯路（先怪目录、后怪开机时长），最终定案的对照是**并发**：
+  后台跑视频管线时，在同目录手动连续调用 3 次全部成功
+  （27.999 / 22.608 / 22.964 ms/帧，exit 0）。脚本退出几秒后，同一条命令就崩，
+  没有重启、没有改文件——只是 GPU 空闲了。
 
-  本轮排除掉的：同目录的 NVIDIA `nvngx_dlssnr.dll`、`Scale` 0.75 vs 1.0、
-  `InlineWaitMs` 100 vs 200、帧内容与尺寸、2.7 GB 残留 dump 文件、VRAM 耗尽。
-  剩下的解释是**引擎初始化在一次开机内会退化**；冷重启是验证方法。见 Issue #3。
+  这解释了其余现象：视频管线能完整跑通（连续 4、6、12 个分段，166–476 ms/帧），
+  因为它全程占着 GPU；而单独一次探针总是从空闲状态初始化。
+  引擎初始化会调进 `amdhip64_7.dll`，在 `+0x465007` 处崩，早于任何一帧运行
+  （`last job -1`）。
+
+  已排除：同目录的 NVIDIA `nvngx_dlssnr.dll`、`Scale` 0.75 vs 1.0、
+  `InlineWaitMs` 100 vs 200、帧内容与尺寸、2.7 GB 残留 dump、VRAM 耗尽
+  （用 4.1 GB / 16 GB）、人为 `ffmpeg` 解码负载、进程间延迟（0 秒和 15 秒都失败）。
+  见 Issue #3。
+
+  **实际影响**：`tools/amd/dlss5-amd-video.ps1` 是可靠的，因为它在整次运行中占着 GPU。
+  任何从空闲桌面启动运行时的操作——包括播放器自己的导出——都可能撞上这个，
+  所以导出如果立刻失败，先跑点吃 GPU 的东西再试。
 - AMD 上没有 RTX VSR、没有 DLSS 超分、没有帧生成。convert probe 如实报告：
   `sr_engines=none`、`stages=nr`。
 - 上游可移植单测 19/20 通过。唯一失败的 `NeuralPrerenderTests`（缓存根探测）在
