@@ -4,7 +4,7 @@
 > Radeon through the OpenNR add-on and the danielblnc HIP runtime instead of NGX
 > feature 18. Everything upstream documents below still holds for NVIDIA; the AMD
 > path, its runtime lock, its evidence chain and its known limits are in
-> **[README.amd.md](README.amd.md)**. Measured on an RX 7800 XT (gfx1101):
+> **[README.amd.md](README.amd.md)**. Chinese: [README.amd.zh-CN.md](README.amd.zh-CN.md). Measured on an RX 7800 XT (gfx1101):
 > 1080p 51.9 ms/frame at 100% scale, 31.6 ms at 75%, 15.8 ms at 50%.
 
 **Put any video through NVIDIA's DLSS 5 neural renderer, and check every frame

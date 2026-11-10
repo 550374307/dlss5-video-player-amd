@@ -1,5 +1,7 @@
 # Running this player on an AMD Radeon (DLSS-NR through the AMD backend)
 
+> 中文版：[README.amd.zh-CN.md](README.amd.zh-CN.md)
+
 This is an addition to the upstream project, not a replacement for it. It lets
 `DLSSVideoPlayer` use the DLSS 5 neural renderer on a Radeon, where NVIDIA's NGX
 feature 18 — the thing the upstream neural pass hangs off — cannot exist.
