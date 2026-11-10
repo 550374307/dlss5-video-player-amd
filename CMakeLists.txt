@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.24)
 
 # VERSION is the single source of the release number: the release workflow gates
 # the tag against it, the assembler compares the built executable's version
@@ -189,6 +189,9 @@ endif()
 # runtime files at run time, not only at packaging time.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json")
 file(READ "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json" RUNTIME_LOCK_JSON)
+# The AMD backend's lock, same schema, same enforcement, different files.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock-amd.json")
+file(READ "${CMAKE_SOURCE_DIR}/packaging/runtime-lock-amd.json" AMD_RUNTIME_LOCK_JSON)
 configure_file(src/RuntimeLockData.h.in "${CMAKE_BINARY_DIR}/generated/RuntimeLockData.h" @ONLY)
 configure_file(src/VersionData.h.in "${CMAKE_BINARY_DIR}/generated/VersionData.h" @ONLY)
 set(GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")

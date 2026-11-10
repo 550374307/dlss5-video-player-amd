@@ -11,6 +11,7 @@
 namespace {
 
 constexpr uint32_t kNvidiaVendorId = 0x10DE;
+constexpr uint32_t kAmdVendorId = 0x1002;
 constexpr std::wstring_view kSafeModeArgument = L"--safe-mode";
 constexpr std::wstring_view kBootstrapMarkerArgument = L"--addon-bootstrap-restarted";
 // RTX 4080 SUPER, driver 610.47: 15.31 ms/frame over 738 frames of a 1080p30
@@ -109,6 +110,24 @@ std::vector<std::wstring> SanitizeRestartArguments(
 
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description)
 {
+    if (vendorId == kAmdVendorId) {
+        // Only RDNA3 is measured. The AMD runtime classifies the device
+        // itself at load ("RDNA3 (gfx1101) detected"), so this branch only
+        // decides the cache path and the pace prior; an unmeasured Radeon
+        // still gets the backend and a 0.0 prior, which RenderPacePrior
+        // documents as "nothing has timed a session on this".
+        if (ContainsCaseInsensitive(description, L"RX 79") ||
+            ContainsCaseInsensitive(description, L"RX 78") ||
+            ContainsCaseInsensitive(description, L"RX 77") ||
+            ContainsCaseInsensitive(description, L"RX 76") ||
+            ContainsCaseInsensitive(description, L"RX 7500") ||
+            ContainsCaseInsensitive(description, L"RX 7400") ||
+            ContainsCaseInsensitive(description, L"RX 7300") ||
+            ContainsCaseInsensitive(description, L"PRO W7")) {
+            return GpuGeneration::AmdRdna3;
+        }
+        return GpuGeneration::OtherAmd;
+    }
     if (vendorId != kNvidiaVendorId) {
         return GpuGeneration::Unsupported;
     }
@@ -138,10 +157,19 @@ const char* GpuGenerationPathName(GpuGeneration generation) noexcept
         case GpuGeneration::Rtx40Ada: return "rtx40";
         case GpuGeneration::Rtx50Blackwell: return "rtx50";
         case GpuGeneration::OtherRtx: return "rtx";
+        case GpuGeneration::AmdRdna3: return "amd-rdna3";
+        case GpuGeneration::OtherAmd: return "amd";
         case GpuGeneration::OtherNvidia:
         case GpuGeneration::Unsupported: break;
     }
     return "unsupported";
+}
+
+// True when the generation runs the neural pass through the AMD backend
+// rather than NVIDIA NGX feature 18.
+bool IsAmdBackend(GpuGeneration generation) noexcept
+{
+    return generation == GpuGeneration::AmdRdna3 || generation == GpuGeneration::OtherAmd;
 }
 
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode)
@@ -153,6 +181,11 @@ bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode)
         case GpuGeneration::Rtx40Ada:
         case GpuGeneration::Rtx50Blackwell:
         case GpuGeneration::OtherRtx:
+        // The AMD backend is a ReShade add-on too, so the same "desired"
+        // flag drives both. What differs is the runtime set in
+        // neural-runtime\ and the evidence the worker accepts.
+        case GpuGeneration::AmdRdna3:
+        case GpuGeneration::OtherAmd:
             return true;
         case GpuGeneration::OtherNvidia:
         case GpuGeneration::Unsupported:
@@ -165,6 +198,16 @@ double RenderPacePrior(GpuGeneration generation) noexcept
 {
     switch (generation) {
         case GpuGeneration::Rtx50Blackwell: return 1.0;
+        // RX 7800 XT (gfx1101), driver 32.0.31021.6002, measured through the
+        // AMD backend on a 1280x720 90-frame sequence: 23.3-37 ms per frame,
+        // median 23.7 ms. The RTX 5090 reference the priors are relative to
+        // costs about 6.8 ms for a 1080p30 frame, so this card needs roughly
+        // 3.5x that - which is what 1.22 is for Ada. Reported as 0.0 so the
+        // first session forecasts nothing and the measured sample decides,
+        // because one 720p sequence is not a pace prior.
+        case GpuGeneration::AmdRdna3:
+        case GpuGeneration::OtherAmd:
+            break;
         // RTX 4080 SUPER, driver 610.47, 1920x1080 live session: measured
         // against the same segment-arrival method as the reference numbers.
         case GpuGeneration::Rtx40Ada: return kAdaRenderPacePrior;
@@ -202,6 +245,27 @@ NeuralRuntimeLayout ClassifyNeuralRuntimeLayout(
                                   static_cast<unsigned>(hasReShadeProxy) +
                                   static_cast<unsigned>(hasNeuralAddon) +
                                   static_cast<unsigned>(hasNeuralRuntime);
+    if (presentCount == 0) return NeuralRuntimeLayout::Absent;
+    if (presentCount == 4) return NeuralRuntimeLayout::Complete;
+    return NeuralRuntimeLayout::Incomplete;
+}
+
+// The AMD set is the same four roles under the names the AMD backend uses:
+// ReShade.ini + dxgi.dll stay vendor-neutral (ReShade is the proxy either
+// way), amd-nr.addon64 replaces renodx-dlss5.addon64, and
+// dlssnr_amd_pass1.dll replaces nvngx_dlssnr.dll. Classified separately so a
+// folder holding half of one set and half of the other is still Incomplete:
+// mixing the two runtimes is what the atomic layout exists to prevent.
+NeuralRuntimeLayout ClassifyAmdNeuralRuntimeLayout(
+    bool hasReShadeConfig,
+    bool hasReShadeProxy,
+    bool hasAmdAddon,
+    bool hasAmdRuntime)
+{
+    const unsigned presentCount = static_cast<unsigned>(hasReShadeConfig) +
+                                  static_cast<unsigned>(hasReShadeProxy) +
+                                  static_cast<unsigned>(hasAmdAddon) +
+                                  static_cast<unsigned>(hasAmdRuntime);
     if (presentCount == 0) return NeuralRuntimeLayout::Absent;
     if (presentCount == 4) return NeuralRuntimeLayout::Complete;
     return NeuralRuntimeLayout::Incomplete;

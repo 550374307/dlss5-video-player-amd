@@ -4,6 +4,7 @@
 #include "DLSSBackend.h"
 #include "NeuralPreflight.h"
 #include "OfflineNeuralRenderer.h"
+#include "RuntimeLock.h"
 #include "TemporalGuides.h"
 #include "Utf8Text.h"
 
@@ -66,6 +67,60 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     bool created = false;
     NVSDK_NGX_Result ngxResult = NVSDK_NGX_Result_Fail;
     NgxNeuralCapability capability;
+    // A Radeon never creates NGX feature 18, so the probe below would spend its
+    // whole budget in a renderer whose NGX init fails and then report the driver
+    // as too old - both wrong, and the last thing between an AMD install and a
+    // render. The AMD backend proves the same claim from its own add-on: the
+    // engine comes up and the network runs a frame, which is what
+    // ParseNeuralRuntimeEvidence reads out of amd-nr.log. Everything after this
+    // branch is shared - the log read, the receipt and the diagnosis.
+    const bool amdBackend = AmdRuntimeStaged(moduleDirectory);
+    if (amdBackend) {
+        const auto [gridW, gridH] = TemporalGuideGenerator::AnalysisGrid(kProbeWidth, kProbeHeight, kProbeFps);
+        D3D12RendererOwner renderer = MakeD3D12Renderer();
+        if (!renderer || !renderer->Initialize(renderWindow, kProbeWidth, kProbeHeight, kProbeWidth, kProbeHeight,
+                                               gridW, gridH, DefaultNeuralCarrierQuality())) {
+            failure = L"The probe renderer could not be initialized.";
+        } else {
+            renderer->SetDLSS(true);
+            // No NGX handle will exist; DLSSFeatureCreated() answers for this.
+            renderer->SetAmdNeuralBackend(true);
+            TemporalGuideGenerator guides;
+            std::vector<uint8_t> frame;
+            GuideFrame guide;
+            for (; attempts < kProbeFrameLimit; ++attempts) {
+                FillProbeFrame(frame, attempts);
+                const FrameIdentity probeFrame{attempts, static_cast<int64_t>(double(attempts) * 1e7 / kProbeFps),
+                                               0, 0, 0, attempts == 0 ? HistoryReset::FirstFrame : HistoryReset::None};
+                if (!guides.Generate(frame.data(), frame.size(), kProbeWidth, kProbeHeight, kProbeWidth, kProbeHeight, kProbeFps,
+                                     probeFrame, guide) ||
+                    !renderer->RenderFrame(frame.data(), frame.size(), guide.guideGridRGBA32F.data(),
+                                           guide.guideGridRGBA32F.size() * sizeof(float), guide.gridW, guide.gridH,
+                                           attempts == 0, guide.motionVectors,
+                                           static_cast<float>(1000.0 / kProbeFps))) {
+                    failure = L"The probe frame could not be evaluated.";
+                    ++attempts;
+                    break;
+                }
+                // The add-on writes its engine-ready and "frame N processed"
+                // lines as presents accumulate, so this polls on the same
+                // cadence as the NVIDIA path rather than every frame.
+                if (attempts % kEvidencePollFrames != 0) continue;
+                const NeuralRuntimeEvidence sofar =
+                    ParseNeuralRuntimeEvidence(ReadNeuralRuntimeSessionLogSnapshot(moduleDirectory));
+                if (sofar.Valid() || sofar.laterFailure) break;
+            }
+            const NeuralRuntimeEvidence settled =
+                ParseNeuralRuntimeEvidence(ReadNeuralRuntimeSessionLogSnapshot(moduleDirectory));
+            created = settled.Valid();
+            if (!created && failure.empty() && settled.laterFailure)
+                failure = L"The AMD neural runtime failed in its own log; see neural-runtime/amd-nr.log.";
+            if (!created && failure.empty())
+                failure = L"The AMD neural runtime did not run a frame within " +
+                          std::to_wstring(attempts) + L" probe frames.";
+        }
+    } else
+
     {
         const auto [gridW, gridH] = TemporalGuideGenerator::AnalysisGrid(kProbeWidth, kProbeHeight, kProbeFps);
         D3D12RendererOwner renderer = MakeD3D12Renderer();
@@ -136,7 +191,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const std::filesystem::path logPath = ResolveNeuralRuntimeLogPath(moduleDirectory);
     const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(logPath.empty() ? segment : ReadWholeFile(logPath));
     const auto observations = CollectFeature18Observations(segment);
-    const auto modules = DescribeRuntimeModules(moduleDirectory, LockedRuntimeFileNames());
+    const auto modules = DescribeRuntimeModules(moduleDirectory, amdBackend ? AmdLockedRuntimeFileNames() : LockedRuntimeFileNames());
     // Which NR DLL ran, and its signature, read off the file the add-on named.
     const std::string nrFile = NeuralRuntimeFileRelativeTo(banner.dlssnrFile, moduleDirectory);
     // The whole path as well, so the player can refuse a fallback DLL outside
@@ -150,11 +205,22 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     // Decided from the settled whole-log read, which is the same evidence `ok`
     // is computed from, so the two can never disagree.
     if (created && failure.empty() && !evidence.Valid())
-        failure = L"The neural runtime did not inject feature 18 within " +
+        failure = amdBackend
+            ? L"The AMD neural runtime evidence did not arm before capture within " +
+                  std::to_wstring(attempts) + L" probe frames."
+            : L"The neural runtime did not inject feature 18 within " +
                   std::to_wstring(attempts) + L" probe frames.";
     const bool ok = failure.empty() && created && evidence.Valid();
-    const NeuralPreflightDiagnosis diagnosis =
-        DiagnoseNeuralPreflight(gpu, observations, created, evidence.Valid(), failure, capability, RunningOnWindows10());
+    // The NVIDIA diagnosis reads the driver floor, the NGX create result and the
+    // core's capability block - none of which exist on a Radeon, and asking for
+    // them is what produced "needs a newer NVIDIA driver" for a card that has no
+    // NVIDIA driver at all. The AMD branch gets a cause of its own, with the
+    // only two outcomes it can have: the add-on ran, or it did not.
+    const NeuralPreflightDiagnosis diagnosis = amdBackend
+        ? NeuralPreflightDiagnosis{ok ? NeuralPreflightCause::None : NeuralPreflightCause::AmdRuntimeFailed,
+                                   std::nullopt,
+                                   ok ? std::wstring() : failure}
+        : DiagnoseNeuralPreflight(gpu, observations, created, evidence.Valid(), failure, capability, RunningOnWindows10());
     if (!ok && failure.empty()) failure = L"Feature 18 runtime evidence did not arm the inline interception contract.";
     // The classified sentence names the code and the action; the generic one
     // is only what is left when nothing could be classified.

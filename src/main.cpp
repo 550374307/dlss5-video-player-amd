@@ -1398,18 +1398,36 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     const bool hasProxy=isRegularRuntimeFile(L"dxgi.dll");
     const bool hasAddon=isRegularRuntimeFile(L"renodx-dlss5.addon64");
     const bool hasRuntime=isRegularRuntimeFile(L"nvngx_dlssnr.dll");
+    // The AMD backend keeps the same four roles under its own names. Checked
+    // here so an AMD or an NVIDIA folder is judged by its own set, and a
+    // folder mixing the two stays Incomplete rather than picking a winner.
+    const bool hasAmdAddon=isRegularRuntimeFile(L"amd-nr.addon64");
+    const bool hasAmdRuntime=isRegularRuntimeFile(L"dlssnr_amd_pass1.dll");
     if(layoutInspectionFailed) return FailBootstrap(L"Unable to inspect the experimental neural runtime layout");
 
-    const NeuralRuntimeLayout layout=ClassifyNeuralRuntimeLayout(
+    const bool amdBackend=IsAmdBackend(options.detectedGpu.generation);
+    const NeuralRuntimeLayout nvidiaLayout=ClassifyNeuralRuntimeLayout(
         hasConfig,hasProxy,hasAddon,hasRuntime);
+    const NeuralRuntimeLayout amdLayout=ClassifyAmdNeuralRuntimeLayout(
+        hasConfig,hasProxy,hasAmdAddon,hasAmdRuntime);
+    // On AMD the AMD set is the one that matters; on NVIDIA it is the NVIDIA
+    // set. Either way a folder that holds anything is judged, so a partly
+    // installed runtime still fails closed instead of being ignored.
+    const NeuralRuntimeLayout layout=amdBackend?amdLayout:nvidiaLayout;
+    if(amdBackend&&amdLayout==NeuralRuntimeLayout::Absent&&nvidiaLayout!=NeuralRuntimeLayout::Absent)
+        LOG("The neural-runtime folder holds the NVIDIA runtime set, but this is a Radeon: the AMD set is "
+            "ReShade.ini, dxgi.dll, amd-nr.addon64 and dlssnr_amd_pass1.dll. Neural rendering stays off.");
     if(layout==NeuralRuntimeLayout::Absent) {
         options.neuralAddonRequested=false;
         options.neuralAddonConfigured=false;
         LOG("Experimental neural runtime absent; continuing in native DLAA developer mode.");
         return StartupResult::Continue;
     }
-    if(layout==NeuralRuntimeLayout::Incomplete || !isRegularRuntimeFile(L"NeuralWorker.exe"))
+    if(layout==NeuralRuntimeLayout::Incomplete || !isRegularRuntimeFile(L"NeuralWorker.exe")) {
+        if (amdBackend)
+            return FailBootstrap(L"The experimental neural runtime is incomplete; require ReShade.ini, dxgi.dll, amd-nr.addon64, and dlssnr_amd_pass1.dll together");
         return FailBootstrap(L"The experimental neural runtime is incomplete; require ReShade.ini, dxgi.dll, renodx-dlss5.addon64, and nvngx_dlssnr.dll together");
+    }
 
     options.neuralAddonRequested=NeuralAddonDesired(options.detectedGpu.generation,options.safeMode);
     options.neuralAddonConfigured=options.neuralAddonRequested;
@@ -1418,7 +1436,16 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     // the driver is too old to say anything else.
     LOG("Isolated neural helper available; player remains hook-free" << (FrameGenAddonState().loaded?" except the dlssg_sm86 add-on":"") << ". GPU=" << WideToUtf8(options.detectedGpu.description)
         << " driver=" << WideToUtf8(options.detectedGpu.driverVersion)
-        << " generation=" << GpuGenerationPathName(options.detectedGpu.generation));
+        << " generation=" << GpuGenerationPathName(options.detectedGpu.generation)
+        << " backend=" << (amdBackend?"amd-hip":"nvidia-ngx"));
+    // The 610.47 floor is where NVIDIA's NGX core creates feature 18. A
+    // Radeon never creates it, so the AMD backend has no driver floor to
+    // check and the HIP runtime it loads does its own version reporting.
+    if (amdBackend) {
+        LOG("AMD backend: neural rendering runs through the OpenNR add-on and the danielblnc HIP runtime, "
+            "not through NGX feature 18, so the NVIDIA driver floor does not apply.");
+        return StartupResult::Continue;
+    }
     switch(ClassifyNeuralDriver(options.detectedGpu.driverVersion)){
     case NeuralDriverSupport::BelowFloor:
         // Feature 18 is serviced by the driver's NGX core, so a driver older
@@ -2087,6 +2114,18 @@ static start_screen::RuntimeState CheckNeuralRuntime(const std::filesystem::path
 {
     const std::filesystem::path runtime=moduleDirectory/L"neural-runtime";
     const auto file=[&](const wchar_t* name){std::error_code error;return std::filesystem::is_regular_file(runtime/name,error);};
+    // The same two sets the boot gate uses. The AMD one is judged first when
+    // its own files are present, so the start screen reports the set that is
+    // actually there rather than calling an AMD install drifted.
+    const NeuralRuntimeLayout amdLayout=ClassifyAmdNeuralRuntimeLayout(
+        file(L"ReShade.ini"),file(L"dxgi.dll"),file(L"amd-nr.addon64"),file(L"dlssnr_amd_pass1.dll"));
+    if(amdLayout!=NeuralRuntimeLayout::Absent) {
+        if(amdLayout==NeuralRuntimeLayout::Incomplete||!file(L"NeuralWorker.exe"))return start_screen::RuntimeState::Incomplete;
+        // The NVIDIA runtime lock cannot describe the AMD set: different
+        // files, different hashes, no Streamline. Reported Verified here and
+        // refused later by the worker's own AMD layout check if it is wrong.
+        return start_screen::RuntimeState::Verified;
+    }
     const NeuralRuntimeLayout layout=ClassifyNeuralRuntimeLayout(file(L"ReShade.ini"),file(L"dxgi.dll"),file(L"renodx-dlss5.addon64"),file(L"nvngx_dlssnr.dll"));
     if(layout==NeuralRuntimeLayout::Absent)return start_screen::RuntimeState::Absent;
     if(layout==NeuralRuntimeLayout::Incomplete||!file(L"NeuralWorker.exe"))return start_screen::RuntimeState::Incomplete;
@@ -2313,10 +2352,15 @@ private:
     bool PrepareRuntime(){
         runtimeDirectory_=in_.moduleDirectory/L"neural-runtime";
         const auto runtimeStarted=std::chrono::steady_clock::now();
-        runtimeDigest_=BuildRuntimeDigest(runtimeDirectory_,LockedRuntimeFileNames(),stop_);if(!runtimeDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The configured neural runtime is incomplete.";return false;}
+        // Which lock applies is decided by what is staged, not by the GPU: the
+        // folder holds one set or the other, and the sets share only the
+        // proxy and the INI. An AMD folder is verified against the AMD lock.
+        const bool amdStaged=AmdRuntimeStaged(runtimeDirectory_);
+        runtimeLock_=amdStaged?&EmbeddedAmdRuntimeLock():&EmbeddedRuntimeLock();
+        runtimeDigest_=BuildRuntimeDigest(runtimeDirectory_,amdStaged?AmdLockedRuntimeFileNames():LockedRuntimeFileNames(),stop_);if(!runtimeDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The configured neural runtime is incomplete.";return false;}
         // The lock names every drifted file; a mismatch is refused, never repaired by swapping runtimes.
         const auto lockStarted=std::chrono::steady_clock::now();
-        lockChecks_=VerifyRuntimeLock(runtimeDirectory_,EmbeddedRuntimeLock(),stop_);
+        lockChecks_=VerifyRuntimeLock(runtimeDirectory_,*runtimeLock_,stop_);
         if(stop_.stop_requested())return Cancelled();
         // What the cold start's `request` phase is made of, so a slow first D
         // press can be pinned on the step that took the time.
@@ -2412,7 +2456,7 @@ private:
         // listed again on every attempt, so removing the file is all
         // it takes. A directory that cannot be listed is left to the
         // helper, which refuses it with its own reason.
-        if(std::wstring refusal=UnlockedRuntimeModulesRefusal(runtimeDirectory_,EmbeddedRuntimeLock());!refusal.empty()){
+        if(std::wstring refusal=UnlockedRuntimeModulesRefusal(runtimeDirectory_,*runtimeLock_);!refusal.empty()){
             completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);
             LOG("Neural render refused before the helper: "<<WideToUtf8(completion_->result.detail));
             return false;
@@ -2470,7 +2514,7 @@ private:
         // declares another file version is refused, never let through.
         const neural_runtime::Runtime wanted=neural_runtime::Select(in_.gpu,in_.settings.previousRuntime);
         if(std::wstring refusal=NeuralRuntimeFileRefusal(PreflightNeuralRuntimeBanner(preflightJson_),runtimeDirectory_,wanted.file,wanted.version,
-                                                         LockedFileVersion(EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
+                                                         LockedFileVersion(*runtimeLock_,wanted.file));!refusal.empty()){
             completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);
             LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));
             return false;
@@ -2673,6 +2717,9 @@ private:
     // Render
     std::optional<std::filesystem::path> staging_;
     std::optional<NeuralRenderReceiptInputs> receipt_;
+    // The lock this job is verified against: the NVIDIA one unless the AMD set
+    // is what is staged.
+    const RuntimeLock* runtimeLock_{&EmbeddedRuntimeLock()};
 };
 
 class PlayerApp {
@@ -4736,6 +4783,11 @@ private:
     // Empty unless this machine's driver is below the neural floor. Built here
     // so the render thread never touches the localizer.
     std::wstring NeuralDriverNoticeText()const{
+        // The floor is where NVIDIA's NGX core creates feature 18. A Radeon does
+        // not run that path at all, and its DXGI version string is not an NVIDIA
+        // driver version, so this notice would read "160.02 is below 610.47" and
+        // refuse every render before the helper had a chance to say otherwise.
+        if(IsAmdBackend(m_opt.detectedGpu.generation))return {};
         const std::wstring belowFloor=T(L"driver.below_floor"),detected=T(L"driver.detected"),minimum=T(L"driver.minimum"),verified=T(L"driver.verified");
         return NeuralDriverNotice(m_opt.detectedGpu.driverVersion,RunningOnWindows10(),{belowFloor,detected,minimum,verified});
     }
@@ -14012,11 +14064,14 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
         }
         list("sr_heights",rungs);
 
-        // The neural runtime, held to the same lock a render is held to.
+        // The neural runtime, held to the same lock a render is held to. On a
+        // Radeon that is the AMD lock: the NVIDIA one names thirteen files no
+        // AMD folder carries, so it would report every AMD install as refused.
         const auto runtimeDirectory=helpers/L"neural-runtime";
         std::string runtime="verified";
+        const RuntimeLock& probeLock=AmdRuntimeStaged(runtimeDirectory)?EmbeddedAmdRuntimeLock():EmbeddedRuntimeLock();
         if(!std::filesystem::is_regular_file(runtimeDirectory/L"NeuralWorker.exe",fileError))runtime="missing";
-        else if(const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,EmbeddedRuntimeLock(),{});!refusal.empty())runtime="refused: "+WideToUtf8(refusal);
+        else if(const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,probeLock,{});!refusal.empty())runtime="refused: "+WideToUtf8(refusal);
         text("neural_runtime",runtime);
         const bool worker=runtime=="verified"&&!command.safeMode;
 

@@ -125,13 +125,17 @@ enum class NeuralPreflightCause {
     OutOfVideoMemory,
     EvidenceIncomplete,
     ProbeFailed,
+    // The AMD backend's only failure: its add-on did not come up and run a
+    // frame. There is no driver floor, no NGX create result and no capability
+    // block on a Radeon, so none of the NVIDIA causes can apply.
+    AmdRuntimeFailed,
 };
 
 // Receipt names, index-aligned with NeuralPreflightCause: the probe writes
 // them, the parent scans them back out of the receipt.
-inline constexpr std::array<std::string_view, 7> kNeuralPreflightCauseNames{
+inline constexpr std::array<std::string_view, 8> kNeuralPreflightCauseNames{
     "none", "driverBelowFloor", "platformRefusal", "architectureUnsupported", "outOfVideoMemory",
-    "evidenceIncomplete", "probeFailed"};
+    "evidenceIncomplete", "probeFailed", "amdRuntimeFailed"};
 
 struct NeuralPreflightDiagnosis {
     NeuralPreflightCause cause{NeuralPreflightCause::None};
@@ -182,6 +186,10 @@ std::string BuildPreflightFailureJson(std::wstring_view detail);
 // leaves BuildRuntimeDigest without a digest - which the render path reports
 // as an incomplete runtime.
 std::span<const std::wstring_view> LockedRuntimeFileNames();
+// The AMD backend's identity files: dxgi.dll, amd-nr.addon64,
+// dlssnr_amd_pass1.dll, dlssnr_on_amd_weights.bin and NeuralWorker.exe. Used
+// for the runtime digest and the lock check when the AMD set is staged.
+std::span<const std::wstring_view> AmdLockedRuntimeFileNames();
 
 // The twelve of those that packaging/runtime-lock.json pins and
 // VerifyRuntimeLock checks. The worker is built from this repository and every

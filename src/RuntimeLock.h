@@ -41,6 +41,16 @@ std::optional<RuntimeLock> ParseRuntimeLock(std::string_view json);
 // once; a build whose embedded lock does not parse terminates on first use.
 const RuntimeLock& EmbeddedRuntimeLock();
 
+// The AMD backend's lock, compiled in from packaging/runtime-lock-amd.json.
+// Same schema and same checks as the NVIDIA one - the files differ, not the
+// enforcement. Empty when the build carries no AMD lock.
+const RuntimeLock& EmbeddedAmdRuntimeLock();
+
+// True when the AMD set is staged in `runtimeDirectory`: amd-nr.addon64 and
+// dlssnr_amd_pass1.dll present. The two sets are never mixed, so this picks
+// which lock a render has to satisfy.
+bool AmdRuntimeStaged(const std::filesystem::path& runtimeDirectory);
+
 // The fileVersion the lock pins for `destination` ("310.8.SF-v2/nvngx_dlssnr.dll"
 // gives "310.8.2.0"), matched ignoring ASCII case and separators; empty when the
 // lock has no such entry.

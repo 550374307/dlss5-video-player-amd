@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "runtimeVersion": "opennr-0.7.15",
+  "entries": [
+    {
+      "sourceName": "ReShade64.dll",
+      "destination": "dxgi.dll",
+      "size": 5592064,
+      "sha256": "0CEE63F9C9F13F3AC909C5B4903F4DBB4B719A7AB3B4F13B0DEAF83C814B94F7",
+      "fileVersion": "6.8.0.2155",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "ReShade 6.8.0 with add-on support, proxy DLL taken from ReShade_Setup_6.8.0_Addon.exe (installer digest afe4c8f13048306307983b8b3d41d5bf00a86820440b0e57dea10950e1176445). Same file the NVIDIA set locks: ReShade is the proxy for both backends. The player root must not carry a dxgi.dll of its own.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#reshade"
+    },
+    {
+      "sourceName": "amd-nr.addon64",
+      "destination": "amd-nr.addon64",
+      "size": 887296,
+      "sha256": "31A1664F0CEEE46349498199FAD3479598DE1A640E03E285CF5DFE004A5075B6",
+      "fileVersion": "",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "OpenNR add-on 0.7.15 (zmodelerlover/OpenNR-ReShade release v0.7.15), downloaded from the project's own release page and verified against its SHA256SUMS.txt and against the installer's payload.json (huggingface.co/datasets/zmodelerlover/amd-nr addon/0.7.15). This is the AMD counterpart of renodx-dlss5.addon64: a ReShade add-on that runs the DLSS-NR network on Radeon hardware through a HIP runtime. Unsigned, MIT-licensed source.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#opennr"
+    },
+    {
+      "sourceName": "dlssnr_amd_pass1.dll",
+      "destination": "dlssnr_amd_pass1.dll",
+      "size": 56677888,
+      "sha256": "430BE589020685D03F0AD92194457BAFE1A186BF658C8CFE2FB7A0BDB7592CC4",
+      "fileVersion": "",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "danielblnc DLSS-NR-on-AMD runtime 0.6.0, the patched build the OpenNR add-on requires (sha256 430be589...), from huggingface.co/datasets/zmodelerlover/amd-nr runtime/0.6.0, pinned in OpenNR-Installer's payload.json. Extracted from dlssnr_on_amd_setup.exe v0.6.0 the unpatched build is 195c4a891b6eac4c...; the add-on patches two call sites (tools/patch_runtime.py) and refuses any build it does not know. HIP kernels for gfx12 (RDNA4), gfx11 (RDNA3) and gfx103x (RDNA2) live in its .hip_fat section. The add-on reports RDNA3 as tested on gfx1100 and gfx1101.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#dlss-nr-on-amd"
+    },
+    {
+      "sourceName": "dlssnr_on_amd_weights.bin",
+      "destination": "dlssnr_on_amd_weights.bin",
+      "size": 147689451,
+      "sha256": "6BF8DC931EF3CCFFE18C82DE26AB374156E7F19539FFCF8EABAA25DCA5CF15AB",
+      "fileVersion": "",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "The DLSS-NR network weights, 153 tensors in the DLSSNRW1 container the runtime parses. NVIDIA-derived: the same tensors appear byte-identical inside nvngx_dlssnr.dll (measured 2026-09-22, docs/spike-rocm/README.md). Served from huggingface.co/datasets/zmodelerlover/amd-nr with a mirror at files.catbox.moe/s1sh5d.bin, pinned in OpenNR-Installer's payload.json. Tools/read_amd_weights.py parses and cross-checks it; this build does not ship it in any package, for the same reason the NVIDIA NR DLLs are not shipped.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
+    }
+  ]
+}

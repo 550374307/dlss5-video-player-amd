@@ -202,7 +202,11 @@ void PumpMessagesUntil(HANDLE completed)
 // never be there at all.
 std::wstring UnlockedRuntimeModules(const std::filesystem::path& moduleDirectory)
 {
-    const auto unlocked = FindUnlockedRuntimeModules(moduleDirectory, EmbeddedRuntimeLock());
+    // Which lock names the files that may be here depends on the set staged:
+    // an AMD folder carries amd-nr.addon64 and the HIP runtime, and judging it
+    // by the NVIDIA lock would report every one of them as unlocked.
+    const RuntimeLock& lock = AmdRuntimeStaged(moduleDirectory) ? EmbeddedAmdRuntimeLock() : EmbeddedRuntimeLock();
+    const auto unlocked = FindUnlockedRuntimeModules(moduleDirectory, lock);
     if (!unlocked) {
         LOG("Neural helper refused: its runtime directory could not be listed for unlocked modules.");
         return L"The helper could not list its runtime directory to check it for modules the runtime lock "
@@ -339,7 +343,9 @@ struct RuntimeStamps {
 RuntimeStamps SnapshotRuntimeStamps(const std::filesystem::path& directory)
 {
     RuntimeStamps stamps;
-    const RuntimeLock& lock = EmbeddedRuntimeLock();
+    // The stamps are what catches a file swapped under a running helper, so
+    // they have to name the set that is actually staged.
+    const RuntimeLock& lock = AmdRuntimeStaged(directory) ? EmbeddedAmdRuntimeLock() : EmbeddedRuntimeLock();
     stamps.files.reserve(lock.entries.size());
     for (const RuntimeLockEntry& entry : lock.entries) {
         WIN32_FILE_ATTRIBUTE_DATA data{};

@@ -39,6 +39,14 @@ constexpr std::array<std::wstring_view, 14> kLockedRuntimeFiles{
     L"sl.interposer.dll", L"sl.nis.dll", L"sl.pcl.dll", L"sl.reflex.dll", L"NeuralWorker.exe"};
 constexpr size_t kLockPinnedRuntimeFileCount = 13;
 
+// The AMD backend's set. Same four roles, its own names, plus the weights it
+// cannot run without; no Streamline (the AMD add-on calls the runtime
+// directly, and the player never used Streamline either - EnableHooks=2 makes
+// the NVIDIA add-on use the raw-NGX path for the same reason).
+constexpr std::array<std::wstring_view, 5> kAmdLockedRuntimeFiles{
+    L"dxgi.dll", L"amd-nr.addon64", L"dlssnr_amd_pass1.dll", L"dlssnr_on_amd_weights.bin",
+    L"NeuralWorker.exe"};
+
 // The NGX core registration the display driver writes; NGX resolves the same
 // value through NGXGetPathUsingQAI, and on this machine it reads
 // C:\WINDOWS\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_<id>.
@@ -355,6 +363,16 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
 std::span<const std::wstring_view> LockedRuntimeFileNames()
 {
     return kLockedRuntimeFiles;
+}
+
+std::span<const std::wstring_view> AmdLockedRuntimeFileNames()
+{
+    // The AMD set's own identity: the four roles the layout gate checks, of
+    // which two are AMD-only, plus the worker. The weights are here because
+    // they are what decides the picture - a swapped .bin with the same runtime
+    // renders something else, so a render keyed on the runtime alone would
+    // reuse a render the user never watched.
+    return kAmdLockedRuntimeFiles;
 }
 
 std::span<const std::wstring_view> LockPinnedRuntimeFileNames()

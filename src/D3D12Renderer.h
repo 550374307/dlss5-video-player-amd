@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <windows.h>
 #include <wrl/client.h>
 #include <d3d12.h>
@@ -615,7 +615,14 @@ public:
     void SetDebugView(DebugView v) { m_debugView = v; m_presentStale = true; }
     DebugView GetDebugView() const { return m_debugView; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
-    bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
+    bool DLSSFeatureCreated() const { return m_amdNeuralBackend || m_dlss.FeatureCreated(); }
+    // The AMD backend has no NGX feature to hold. Its "feature created" is the
+    // add-on's engine coming up beside the runtime, which the worker reads from
+    // amd-nr.log; declaring it here keeps every gate that asks "is the neural
+    // path armed" answered by the backend that is actually running, instead of
+    // by a handle a Radeon can never create.
+    void SetAmdNeuralBackend(bool on) { m_amdNeuralBackend = on; }
+    bool AmdNeuralBackend() const { return m_amdNeuralBackend; }
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
     NVSDK_NGX_Result DLSSLastResult() const { return m_dlss.LastResult(); }
     const NgxNeuralCapability& DLSSNeuralCapability() const { return m_dlss.NeuralCapability(); }
@@ -1144,6 +1151,11 @@ private:
     bool m_depthInWrite = true;
     bool m_outputInUAV = true;
     bool m_dlssEnabled = true;
+    // Set when the neural pass runs through the AMD backend instead of NGX.
+    // DLSSFeatureCreated() reports true on it, because every gate that asks
+    // that question means "the neural path is armed", not "an NGX handle
+    // exists".
+    bool m_amdNeuralBackend = false;
     bool m_requestedTearing = false;
     bool m_followWindow = false;
     static inline std::atomic<uint64_t> s_instances{0};

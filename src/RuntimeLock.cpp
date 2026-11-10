@@ -137,6 +137,26 @@ const RuntimeLock& EmbeddedRuntimeLock()
     return lock;
 }
 
+const RuntimeLock& EmbeddedAmdRuntimeLock()
+{
+    // Same rule as the NVIDIA lock: an unparseable AMD lock is the empty lock,
+    // which RuntimeLockSatisfied never accepts, so the render is refused
+    // rather than run against files nobody verified.
+    static const RuntimeLock lock = ParseRuntimeLock(kAmdRuntimeLockJson).value_or(RuntimeLock{});
+    return lock;
+}
+
+bool AmdRuntimeStaged(const std::filesystem::path& runtimeDirectory)
+{
+    // Both roles that are unique to the AMD set. ReShade.ini and dxgi.dll are
+    // shared with the NVIDIA set, so they cannot tell the two apart; these can.
+    std::error_code error;
+    const bool addon = std::filesystem::is_regular_file(runtimeDirectory / L"amd-nr.addon64", error);
+    error.clear();
+    const bool runtime = std::filesystem::is_regular_file(runtimeDirectory / L"dlssnr_amd_pass1.dll", error);
+    return addon || runtime;
+}
+
 std::wstring LockedFileVersion(const RuntimeLock& lock, std::wstring_view destination)
 {
     const auto key = [](std::wstring_view text) {

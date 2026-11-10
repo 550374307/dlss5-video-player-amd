@@ -31,6 +31,7 @@
 #include "FrameResample.h"
 #include "NvencDirect.h"
 #include "NvencDirectPolicy.h"
+#include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
 
@@ -252,6 +253,22 @@ uint64_t HighestEvaluationCount(std::string_view lower)
             const auto parsed = std::from_chars(first, last, value);
             if (parsed.ec == std::errc{}) highest = std::max(highest, value);
         }
+    }
+    // The AMD add-on's counter: "frame 240 processed (0 skipped)". That number
+    // is the frame the network finished, which is what the NVIDIA markers above
+    // carry - the same quantity under a different name, and the one the receipt
+    // gate compares a later read against.
+    constexpr std::string_view processed=" processed (";
+    size_t position = 0;
+    while ((position = lower.find("frame ", position)) != std::string_view::npos) {
+        position += 6;
+        const char* first = lower.data() + position;
+        const char* last = lower.data() + lower.size();
+        uint64_t value = 0;
+        const auto parsed = std::from_chars(first, last, value);
+        if (parsed.ec == std::errc{} && static_cast<size_t>(parsed.ptr - lower.data()) + processed.size() <= lower.size() &&
+            std::string_view(parsed.ptr, processed.size()) == processed)
+            highest = std::max(highest, value);
     }
     return highest;
 }
@@ -1190,7 +1207,7 @@ private:
             // per frame because a retry pass re-renders everything and only its
             // own work counts; sampled after the preroll because those frames are
             // evaluated without being captured.
-            neuralEvaluationsBefore_ = job_.NeuralEvaluations();
+            neuralEvaluationsBefore_ = job_.NeuralEvaluationCount();
             {
                 // Capped so a nonsense duration cannot reserve gigabytes up front: past
                 // about 4.8 hours at 60 fps the series simply grow as they did before.
@@ -1203,7 +1220,7 @@ private:
             const auto reportStages=[&]{ReportStageTimings(kind_,stages_,attempt_,job_.evaluator_);};
             ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
             const auto recordNeuralEvaluations = [&] {
-                const uint64_t now = job_.NeuralEvaluations();
+                const uint64_t now = job_.NeuralEvaluationCount();
                 attempt_.neuralEvaluations = now > neuralEvaluationsBefore_ ? now - neuralEvaluationsBefore_ : 0;
             };
             // Declared after the stage report so it runs before it: the stage table
@@ -1419,6 +1436,24 @@ private:
         // fails ends the attempt (never skipped). Device loss is not retried.
         // `pipelined` records the capture without waiting for the GPU: the pixels
         // come back from DrainOldest, which waits only on that frame's fence.
+        // Whether a submission's evaluation is proved by its counter moving.
+        //
+        // On NVIDIA the NGX count advances inside the call, so "after > before"
+        // is exact. On AMD the add-on runs the network asynchronously inside
+        // Present and reports it as "frame N processed" one log append later,
+        // so no single submission can observe its own count. The proof there is
+        // the one this player already keeps for runs whose counter has stopped:
+        // the neural pass must consume real GPU time, which
+        // NeuralTimingClearsFloor judges on the whole attempt, and a frame that
+        // silently passed through shows up as a timing floor the run cannot
+        // clear. A submission that returned success is therefore accepted here
+        // and judged there, rather than failing every frame up front.
+        bool EvaluationAdvanced(uint64_t before) const
+        {
+            if (job_.amdNeuralBackend_) return true;
+            return job_.evaluator_.EvaluationCount() > before;
+        }
+
         NeuralRenderFailure Evaluate(const JobFrame& frame, HistoryReset reason, bool capture,
                                      bool pipelined, JobEvaluation& out)
         {
@@ -1427,6 +1462,9 @@ private:
             FrameIdentity id = job_.Identity(frame, reason);
             for (uint32_t retry = 0;; ++retry) {
                 if (job_.stop_.stop_requested()) return NeuralRenderFailure::Cancelled;
+                // On AMD the count the comparison below reads is the add-on's,
+                // so it is refreshed from the log before "before" is taken.
+                job_.RefreshAmdEvaluations();
                 const uint64_t before = evaluator.EvaluationCount();
                 // Keep the pixel buffer's capacity across retries: the receipt gate
                 // resubmits the same frame up to 120 times, and re-growing a full
@@ -1439,9 +1477,9 @@ private:
                     StageClock clock(stages_.submit);
                     ok = pipelined
                         ? evaluator.SubmitAsync(frame, id, out) &&
-                              evaluator.EvaluationCount() > before
+                              EvaluationAdvanced(before)
                         : evaluator.Submit(frame, id, capture, out) &&
-                              evaluator.EvaluationCount() > before &&
+                              EvaluationAdvanced(before) &&
                               (!capture || out.bgra.size() == job_.expectedBytes_);
                 }
                 if (ok) {
@@ -1616,7 +1654,7 @@ private:
         {
             // Sampled here, after any gate resubmits, so the backend's count is held
             // to exactly the submissions that produced captured frames and their retries.
-            if (submitted_ == 0) neuralEvaluationsBefore_ = job_.NeuralEvaluations();
+            if (submitted_ == 0) neuralEvaluationsBefore_ = job_.NeuralEvaluationCount();
             const auto evalStart = SteadyClock::now();
             JobEvaluation evaluation;
             const bool pipelined = submitted_ > 0;
@@ -1834,6 +1872,13 @@ private:
             if constexpr (requires { evaluator_.Reused(); }) return evaluator_.Reused();
             else return false;
         }();
+        // Same place the job learns whether it paid the bring-up: which backend
+        // is running decides both what arms the pass and what proves a frame
+        // was rendered.
+        amdNeuralBackend_ = [&] {
+            if constexpr (requires { evaluator_.AmdNeuralBackend(); }) return evaluator_.AmdNeuralBackend();
+            else return false;
+        }();
         if (!evaluatorReused_) MarkColdStart(NeuralColdStartPhase::NeuralInit);
         expectedBytes_ = static_cast<size_t>(
             EncoderFrameBytes(evaluator_.CapturePixelFormat(), outputWidth_, outputHeight_));
@@ -1847,7 +1892,15 @@ private:
         const bool singleFrameSource = totalFrames_ == 1;
         const uint64_t primeLimit = singleFrameSource
             ? 120 : std::max<uint64_t>(2, std::min<uint64_t>(totalFrames_, 120));
-        for (; !evaluator_.FeatureCreated() && primed_ < primeLimit; ++primed_) {
+        for (; primed_ < primeLimit; ++primed_) {
+            // On NVIDIA this is the NGX feature the presenter creates. On AMD
+            // the add-on creates the same carrier when it first sees a present,
+            // and there is no handle to ask about, so the loop's stop is the
+            // add-on's own log: engine up, and a frame through the network.
+            const bool armed = amdNeuralBackend_
+                ? (primed_ > 0 && ParseNeuralRuntimeEvidence(evidenceProvider_()).Valid())
+                : evaluator_.FeatureCreated();
+            if (armed) break;
             if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
             if (!singleFrameSource || primed_ == 0) {
                 const JobRead read = source_.Read(primingFrame_, stop_);
@@ -1913,9 +1966,29 @@ private:
             }
         }
         if (request.requireNeural && !armedEvidence.Valid()) {
-            source_.Close();
-            return Fail(NeuralRenderFailure::Neural,
-                        L"Feature 18 inline interception was not armed before frame capture.");
+            // On the AMD backend the arming signal is the add-on's first
+            // "frame N processed" line, which lands one present later than the
+            // engine-ready line the priming loop can already see. The loop
+            // above reads the log every tenth present; a Radeon needs the read
+            // that follows the frame it just ran, so the arming budget is spent
+            // here on presents that actually carry a frame rather than on the
+            // sparse sampling above.
+            if (amdNeuralBackend_ && primed_ > 0) {
+                for (uint64_t extra = 0; extra < 60; ++extra) {
+                    if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+                    if (!PresentPrimingFrame(HistoryReset::None)) {
+                        source_.Close();
+                        return Fail(EvaluatorFailure(), L"Feature 18 priming failed.");
+                    }
+                    armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider_());
+                    if (armedEvidence.Valid()) break;
+                }
+            }
+            if (!armedEvidence.Valid()) {
+                source_.Close();
+                return Fail(NeuralRenderFailure::Neural,
+                            L"Feature 18 inline interception was not armed before frame capture.");
+            }
         }
         result_.feature18ArmedBeforeCapture=request.requireNeural;
         // Priming is what creates feature 18 and what the add-on arms its detours
@@ -1972,6 +2045,35 @@ private:
     // The neural backend's own Evaluate tally: the NGX count in production, and
     // whatever the injected evaluator vouches for in the tests.
     uint64_t NeuralEvaluations() { return evaluator_.NeuralEvaluations(); }
+
+    // The count the per-frame gates compare. On NVIDIA it is NGX's own
+    // evaluation counter. On a Radeon there is no such counter: the AMD
+    // add-on's "frame N processed" line is the same quantity reported one
+    // append later, and it is what the gates have to see - the NGX counter
+    // answers zero on every Radeon frame, which would fail a healthy render.
+    uint64_t NeuralEvaluationCount()
+    {
+        if (amdNeuralBackend_) {
+            const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider_());
+            if (receipt.highestObservedEvaluation > 0) return receipt.highestObservedEvaluation;
+        }
+        return NeuralEvaluations();
+    }
+
+    // Reads the AMD add-on's processed-frame count out of its log and hands it
+    // to the evaluator, whose per-frame check compares it across a submission.
+    // The log is append-only for the session, so the count only grows; a read
+    // that finds nothing keeps the last value rather than dropping to zero.
+    void RefreshAmdEvaluations()
+    {
+        if (!amdNeuralBackend_) return;
+        const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider_());
+        if (receipt.highestObservedEvaluation == 0) return;
+        // Only the production adapter carries that backend's counter; the
+        // injected test adapters drive their own and have nothing to update.
+        if constexpr (requires { evaluator_.SetAmdEvaluations(uint64_t{}); })
+            evaluator_.SetAmdEvaluations(receipt.highestObservedEvaluation);
+    }
 
     // The job's own history generation: bumped for every reset it requests.
     // The evaluator stamps its own generation on its outputs; SameSource
@@ -2087,6 +2189,9 @@ private:
     uint32_t historyGeneration_ = 0;
     // BringUp, PrimeFeature, ArmBeforeCapture, RestartAtPreroll
     bool evaluatorReused_ = false;
+    // The neural pass is the AMD add-on's, so the evidence that arms it and the
+    // frames it evaluates come from amd-nr.log and there is no NGX feature.
+    bool amdNeuralBackend_ = false;
     uint64_t primed_ = 0;
     JobFrame primingFrame_;
     uint64_t successfulAttemptBaseline_ = 0;
@@ -2338,6 +2443,10 @@ struct ProductionEvaluatorAdapter {
     // Declared ahead of the renderer, which points at it, so it outlives it.
     NvencSurfacePool directSurfaces;
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
+    // The AMD add-on's processed-frame count, which stands in for
+    // successfulEvaluations on that backend. Atomic because the evidence reader
+    // and the render thread both touch it.
+    std::atomic<uint64_t> amdEvaluations{0};
     TemporalGuideGenerator guides;
     uint32_t width{},height{};
     // Capture size. Equal to width/height unless the job upscales, and part of
@@ -2365,6 +2474,11 @@ struct ProductionEvaluatorAdapter {
     // The Super Resolution carrier's history (UpscalingPolicy.h), per job. Temporal
     // for any job the model runs on; the request is refused otherwise.
     UpscalingHistory upscalingHistory{kDefaultUpscalingHistory};
+    // Set before Initialize by whoever knows which runtime set is staged. On a
+    // Radeon the neural pass is the AMD add-on's, so the renderer reports the
+    // neural path armed without an NGX handle, and the evidence the job is
+    // judged on comes from amd-nr.log rather than ReShade.log.
+    bool amdNeuralBackend{false};
     bool ApplyGuideFiles(const FrameIdentity& id,GuideFrame& guide){
         std::string error;
         if(guide_files::Apply(guideFiles,id.frameNumber,guide,&error))return true;
@@ -2422,6 +2536,8 @@ struct ProductionEvaluatorAdapter {
     // What the live renderer was built with, for the reuse comparison.
     bool builtSuperResolutionCarrier=false;
     bool Reused()const{return reused;}
+    // The job asks this before it decides what arming evidence to wait for.
+    bool AmdNeuralBackend()const{return amdNeuralBackend;}
     bool Initialize(HWND window,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double rate,const GuideControls& controls,
                     PixelLayout layout,const SourceColorDescription& color){
         if(!ow||!oh){ow=w;oh=h;}
@@ -2483,6 +2599,14 @@ struct ProductionEvaluatorAdapter {
         // Nobody looks at this renderer's swapchain - the encoder is fed from the cache
         // render target EnqueueEvaluatedFrameCapture draws for itself - but every frame
         // still presents: the RenoDX add-on performs its feature-18 pass per present.
+        //
+        // On a Radeon there is no feature 18 to wait for: the present is still
+        // what the pass hangs off, because the add-on hooks Present and runs the
+        // network there, but the handle every gate below asks about never
+        // exists. The AMD backend says so, and DLSSFeatureCreated() answers for
+        // it - the evidence in amd-nr.log is what actually decides whether a
+        // frame was rendered, exactly as ReShade.log decides it on NVIDIA.
+        if(amdNeuralBackend)renderer->SetAmdNeuralBackend(true);
         ApplyGuideSettings(controls);renderer->SetDLSS(true);return true;
     }
     // Drops the device, the NGX instance and the feature-18 workset the add-on
@@ -2747,12 +2871,30 @@ struct ProductionEvaluatorAdapter {
         return EncoderPixelFormat::Bgra;
     }
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
-    uint64_t EvaluationCount()const{return successfulEvaluations;}
+    uint64_t EvaluationCount()const{
+        // Every capture check compares this before and after a submission to
+        // prove that submission was evaluated. On NVIDIA it is the count of
+        // Evaluate calls that returned success. On a Radeon there is no NGX
+        // Evaluate to count: the add-on runs the network inside Present and
+        // reports it as "frame N processed", so the same proof is taken from
+        // that. A zero here would fail every frame of a healthy AMD render.
+        return amdNeuralBackend?amdEvaluations.load():successfulEvaluations;
+    }
+    // Set by the job as the AMD add-on's processed-frame count advances.
+    void SetAmdEvaluations(uint64_t count){amdEvaluations.store(count);}
     // The NGX backend's own count of Evaluate calls that returned success. Unlike
     // the add-on's log counter this is per process and monotonic with no logging
     // cadence in the way, so a job that reused an armed feature can still prove
     // the neural pass ran once per frame it captured.
-    uint64_t NeuralEvaluations()const{return renderer?renderer->DLSSEvaluations():0;}
+    uint64_t NeuralEvaluations()const{
+        // The per-frame checks compare this count across a capture to prove the
+        // frame was evaluated rather than passed through. On NVIDIA it is NGX's
+        // own counter. On AMD there is no NGX count to read: the add-on's
+        // "frame N processed" line is the same quantity, one append behind, so
+        // it is what the gate has to be told - reading the NGX counter here
+        // would answer zero for every frame and fail a healthy render.
+        return renderer?renderer->DLSSEvaluations():0;
+    }
     void ResetTemporal(){guides.Reset();DiscardPending();}
     bool RequestFeatureRehook(){
         if(!renderer)return false;
@@ -2972,7 +3114,11 @@ std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& r
     // read as evidence.
     static const uint64_t started=ProcessStartFileTime();
     std::filesystem::path best;uint64_t newest=0;
-    for(const wchar_t* name:{L"ReShade.log",L"ReShade.log1"}){
+    // The AMD backend's add-on writes amd-nr.log instead of ReShade.log, and it
+    // is the same kind of evidence: one append-only session log per runtime
+    // directory, truncated when the add-on loads and rewritten from the start
+    // when the runtime directory is rebuilt.
+    for(const wchar_t* name:{L"ReShade.log",L"ReShade.log1",L"amd-nr.log"}){
         const std::filesystem::path candidate=runtimeDirectory/name;
         const auto written=LastWriteFileTime(candidate);
         if(!written||*written<started)continue;
@@ -3110,6 +3256,59 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
         lower.find("pre-sr feature 18 evaluation succeeded")!=std::string::npos;
     evidence.feature18Created=created!=std::string::npos;
     evidence.feature18Evaluated=evaluated;
+    // The AMD backend's evidence, from amd-nr.log. There is no feature 18 on a
+    // Radeon - the add-on drives the HIP runtime itself - so the same three
+    // things are proved by what that add-on does log when the network ran:
+    //   1. a runtime loaded and its engine came up   -> "engine ready." and a
+    //      "runtime: danielblnc 0.6.0 (hash)" line, which names the exact build
+    //      the lock pins;
+    //   2. the network ran at the source's own size  -> "raster: ... network at
+    //      WxH (scale 1.00)";
+    //   3. it evaluated frames, and kept evaluating -> "frame N processed"
+    //      with the skipped count, and no "off:" line before it.
+    // A refusal ("pass N refused", "engine latched async", "off:") is the AMD
+    // counterpart of laterFailure and is caught below with the same care.
+    if(!evidence.feature18Created){
+        const bool amdRuntime=lower.find("runtime: danielblnc")!=std::string::npos;
+        const bool engineReady=lower.find("engine ready.")!=std::string::npos;
+        evidence.feature18Created=amdRuntime&&engineReady;
+    }
+    if(!evidence.feature18Evaluated){
+        // "frame <n> processed (<skipped> skipped)" - the number that advanced
+        // is the count of evaluations the network actually completed.
+        const size_t processed=lower.find("frame ");
+        evidence.feature18Evaluated=
+            processed!=std::string::npos&&
+            lower.find(" processed (")!=std::string::npos;
+    }
+    if(!evidence.nativeResolution){
+        // "(scale 1.00)" with a network size equal to the back buffer is the
+        // AMD add-on stating the same outcome "(native 1:1)" states: the model
+        // ran at the source's own resolution, not on an upscaled copy.
+        const size_t raster=lower.find("raster: ");
+        evidence.nativeResolution=raster!=std::string::npos&&lower.find("(scale 1.00)")!=std::string::npos;
+    }
+    if(!evidence.inlineInterceptionContract){
+        // The NVIDIA half of this is "the pass came through this player's own
+        // NGX path rather than Streamline's". The AMD add-on has exactly one
+        // route - it loads the runtime beside itself and drives it in-process -
+        // and says so by naming the runtime and the device it bound to.
+        const bool hipDevice=lower.find("hip: device ")!=std::string::npos;
+        const bool matched=lower.find("matches the game's d3d12 device")!=std::string::npos||
+                           lower.find("-> same adapter")!=std::string::npos;
+        evidence.inlineInterceptionContract=hipDevice&&matched;
+    }
+    if(evidence.feature18Evaluated&&evidence.highestObservedEvaluation==0){
+        // The count the NVIDIA path reads off the add-on's evaluate counter;
+        // on AMD it is the highest "frame N processed" the session reached.
+        size_t at=lower.rfind("frame ");
+        while(at!=std::string::npos){
+            size_t i=at+6;uint64_t value=0;bool any=false;
+            while(i<lower.size()&&lower[i]>='0'&&lower[i]<='9'){value=value*10+(lower[i]-'0');any=true;++i;}
+            if(any&&lower.compare(i,11," processed (")==0){evidence.highestObservedEvaluation=value;break;}
+            at=at==0?std::string::npos:lower.rfind("frame ",at-1);
+        }
+    }
     // Both vocabularies, so pinning either add-on keeps its own failures
     // detected. The 4.70-only entries cost a string search and catch a
     // downgrade; the 6.x entries are the ones that would otherwise let a
@@ -3142,6 +3341,24 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
     for(const auto failure:failures){
         if(lower.find(failure)!=std::string::npos)evidence.laterFailure=true;
     }
+    // The AMD add-on's own failure words, and only the ones that mean the
+    // network did not render what the job asked for:
+    //   "engine init failed."            the HIP engine never came up
+    //   "reported a native failure"      a kernel faulted mid-session
+    //   "weight files are missing"       nothing to run
+    //   "could not build the weights"    the weights did not parse
+    //   "engine latched async"           the add-on stood down its inline path
+    // Deliberately NOT here, because a healthy session says all three:
+    //   "off: the game destroyed its D3D12 device" - ordinary teardown, logged
+    //      after the last frame of every successful job;
+    //   "pass 1 refused (n total)" - a per-frame decline the add-on retries,
+    //      of which a good render has some and still processes every frame;
+    //   "1 asked, 1 accepted" - the count, not a refusal.
+    for(const std::string_view amdFailure:{"engine init failed.","reported a native failure",
+                                          "weight files are missing","could not build the weights",
+                                          "engine latched async"}){
+        if(lower.find(amdFailure)!=std::string::npos)evidence.laterFailure=true;
+    }
     evidence.highestObservedEvaluation=HighestEvaluationCount(lower);
     return evidence;
 }
@@ -3172,6 +3389,10 @@ public:
         : runtimeDirectory_(std::move(runtimeDirectory)) {}
 
     void BeginJob(bool featureAlreadyArmed) { skipStabilityOnce_ = featureAlreadyArmed; }
+
+    // The directory this session's log comes from, which is also the one the
+    // staged runtime set lives in.
+    const std::filesystem::path& RuntimeDirectory() const { return runtimeDirectory_; }
 
     std::string operator()()
     {
@@ -3204,7 +3425,14 @@ public:
 private:
     const std::filesystem::path& Pinned()
     {
-        if (pinned_.empty()) pinned_ = ResolveNeuralRuntimeLogPath(runtimeDirectory_);
+        // Re-resolved every read rather than cached once. The AMD add-on opens
+        // amd-nr.log with "w" in its DllMain, so the file exists and is empty
+        // for the first moments of the session and only then carries the
+        // engine-ready and frame lines. A path pinned on the first read - before
+        // the add-on had written anything - would answer nothing for the rest of
+        // the job, which is exactly the state a Radeon starts in. On NVIDIA this
+        // costs one stat per read and returns the same file every time.
+        pinned_ = ResolveNeuralRuntimeLogPath(runtimeDirectory_);
         return pinned_;
     }
 
@@ -3225,7 +3453,14 @@ private:
 // and the source decoder last.
 struct OfflineNeuralRenderer::Retained {
     explicit Retained(std::filesystem::path runtimeDirectory)
-        : evidence(std::move(runtimeDirectory)) {}
+        : evidence(std::move(runtimeDirectory)) {
+        // Decided here because this is the one place that is told which
+        // runtime directory the job runs out of, and the evaluator has to know
+        // before Initialize: on a Radeon the neural pass is the AMD add-on's,
+        // so no NGX feature is ever created and every gate that waits for one
+        // would wait forever.
+        evaluator.amdNeuralBackend = AmdRuntimeStaged(evidence.RuntimeDirectory());
+    }
     ProductionSourceAdapter source;
     ProductionEvaluatorAdapter evaluator;
     ProductionEncoderAdapter encoder;

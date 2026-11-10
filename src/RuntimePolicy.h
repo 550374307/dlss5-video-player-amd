@@ -23,6 +23,13 @@ enum class GpuGeneration {
     // Generation", "RTX PRO 6000 Blackwell") outside the GeForce naming.
     OtherRtx,
     OtherNvidia,
+    // AMD Radeon parts. The neural pass on these runs through the AMD
+    // backend (OpenNR add-on + danielblnc HIP runtime) instead of NVIDIA
+    // NGX feature 18, which no Radeon can create. gfx1101 is the only one
+    // measured here: an RX 7800 XT rendered 23-37 ms/frame at 720p and
+    // 51.9 ms at 1080p, 31.6 ms at 0.75 scale.
+    AmdRdna3,
+    OtherAmd,
     Unsupported,
 };
 
@@ -277,6 +284,9 @@ bool NeuralPublishDurationsMatch(
 
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
+// True when neural rendering on this generation goes through the AMD backend
+// (OpenNR add-on + danielblnc HIP runtime) rather than NVIDIA NGX feature 18.
+bool IsAmdBackend(GpuGeneration generation) noexcept;
 NeuralRenderDefaults ResolveNeuralRenderDefaults(
     bool neuralAddonConfigured,
     bool outputExplicit,
@@ -287,6 +297,13 @@ NeuralRuntimeLayout ClassifyNeuralRuntimeLayout(
     bool hasReShadeProxy,
     bool hasNeuralAddon,
     bool hasNeuralRuntime);
+// The AMD set: same four roles, amd-nr.addon64 and dlssnr_amd_pass1.dll in
+// place of the RenoDX add-on and the NVIDIA NR runtime.
+NeuralRuntimeLayout ClassifyAmdNeuralRuntimeLayout(
+    bool hasReShadeConfig,
+    bool hasReShadeProxy,
+    bool hasAmdAddon,
+    bool hasAmdRuntime);
 DetectedGpu DetectHighPerformanceGpu();
 RuntimeArguments ParseRuntimeArguments(int argc, const wchar_t* const* argv);
 std::vector<std::wstring> BuildSafeModeRestartArguments(

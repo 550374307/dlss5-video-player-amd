@@ -152,7 +152,11 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         // Streamline modules from this directory, and the helper's own check
         // of stray modules at startup came after the settings were written.
         {
-            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:EmbeddedRuntimeLock(),stop);
+            // Which lock the job is held to follows what is staged, so an AMD
+            // folder is judged by the AMD lock. job.runtimeLock still wins when
+            // the caller named one.
+            const RuntimeLock& defaultLock=AmdRuntimeStaged(runtimeDirectory)?EmbeddedAmdRuntimeLock():EmbeddedRuntimeLock();
+            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:defaultLock,stop);
             if(stop.stop_requested())return {StageExportStatus::Cancelled,{}};
             if(!refusal.empty()){
                 LOG("Stage export refused before the helper: "<<utf8_text::FromWide(refusal));
@@ -205,7 +209,7 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
             // Fails closed: a log that names no DLL, a DLL outside the runtime
             // or one declaring another file version is refused, not exported.
             if(const std::wstring refusal=NeuralRuntimeFileRefusal(banner,runtimeDirectory,wanted.file,wanted.version,
-                                                                   LockedFileVersion(EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
+                                                                   LockedFileVersion(AmdRuntimeStaged(runtimeDirectory)?EmbeddedAmdRuntimeLock():EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
                 sweep();
                 LOG("Stage export refused after the helper: "<<utf8_text::FromWide(refusal));
                 return {StageExportStatus::Failed,refusal};

@@ -6,3 +6,8 @@
 // the helper verify the staged neural runtime against this exact lock before
 // every render; a drifted file is reported by name and refuses the render.
 inline constexpr std::string_view kRuntimeLockJson = R"lock(@RUNTIME_LOCK_JSON@)lock";
+
+// Generated from packaging/runtime-lock-amd.json. The AMD set has the same four
+// roles under different names; it is verified by the same code against this
+// lock, so an AMD render is refused on drift exactly as an NVIDIA one is.
+inline constexpr std::string_view kAmdRuntimeLockJson = R"lock(@AMD_RUNTIME_LOCK_JSON@)lock";
