@@ -737,6 +737,30 @@ int RunRealWorker(int argc, wchar_t** argv)
     return result.ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// The runtime this build names has to match the backend the GPU belongs to. On a
+// Radeon the export path demands the file that log names, and the log can only name
+// what was launched - so a stale NVIDIA answer here refuses a render that was
+// entirely neural, which is exactly what happened before kAmd existed.
+void the_runtime_choice_follows_the_gpu_backend_test()
+{
+    using namespace neural_runtime;
+    // NVIDIA keeps its own answers, including the Blackwell split.
+    CHECK(Select(GpuGeneration::Rtx50Blackwell, false).file == L"nvngx_dlssnr.dll");
+    CHECK(Select(GpuGeneration::Rtx40Ada, false).file == L"310.8.SF-v2/nvngx_dlssnr.dll");
+    CHECK(Select(GpuGeneration::Rtx20Turing, true).file == L"310.8.SF-v2/nvngx_dlssnr.dll");
+    // The AMD backend names its own file and version, and "previous" means nothing
+    // there because the set has one runtime.
+    for (const GpuGeneration amd : {GpuGeneration::AmdRdna3, GpuGeneration::OtherAmd}) {
+        CHECK(Select(amd, false).file == L"dlssnr_amd_pass1.dll");
+        CHECK(Select(amd, true).file == L"dlssnr_amd_pass1.dll");
+        CHECK(Select(amd, false).version == "opennr-0.7.15");
+        // The danielblnc build carries network A only.
+        CHECK(!Select(amd, false).networkB);
+        // Nothing AMD-shaped may be given an NVIDIA filename to look for.
+        CHECK(Select(amd, false).file.find(L"nvngx") == std::wstring_view::npos);
+    }
+}
+
 void nonexistent_helper_fails_test()
 {
     size_t progressCount = 0;
@@ -3447,6 +3471,7 @@ int wmain(int argc, wchar_t** argv)
     if (argc > 1 && std::wstring_view(argv[1]) == L"--exit-now") return 0;
     test_support::ContainChildProcesses();
     SetEnvironmentVariableW(kTestRunVariable, std::to_wstring(GetCurrentProcessId()).c_str());
+    the_runtime_choice_follows_the_gpu_backend_test();
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
     the_frame_rate_reaches_the_helper_exactly_test();
