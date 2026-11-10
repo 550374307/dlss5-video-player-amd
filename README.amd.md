@@ -166,9 +166,17 @@ then encodes and copies the source audio through. A 140 s 4K film took about
 
 ## 8. Known limits
 
-- **Export and cache work, verified on hardware.** `dlss5-convert --stages nr` over a
-  120-frame 720p clip exits 0 and writes the file with its audio, and the exported
-  frame carries red as red, green as green, blue as blue.
+- **Export and cache work, verified on hardware, at 4K as well as 720p.**
+
+  | run | result |
+  |---|---|
+  | 120-frame 720p | exit 0, 4.11 MB with audio, colours in order |
+  | 4199-frame 4K | exit 0, 324 MB, 3840x2160 h264 + aac, 139.97 s |
+  | `tools/amd/dlss5-amd-video.ps1` | 4 / 6 / 12 consecutive segments |
+
+  The 4K frame at t=60 s against its source: 70.04% of pixels changed, PSNR 27.91 dB,
+  per-channel mean difference R 5.3 / G 4.2 / B 3.9 — a neural edit with the channels
+  in order, not a passthrough.
 
   The capture reads the frame the add-on composited: `RecordAmdPresentedCopy` copies
   the presented backbuffer into a private texture that `AmdPresentedSRV` views, in

@@ -135,8 +135,16 @@ powershell -ExecutionPolicy Bypass -File tools\amd\dlss5-amd-video.ps1 `
 
 ## 七、已知限制
 
-- **导出与缓存可用，已在硬件上验证。** 对一段 120 帧 720p 片源跑
-  `dlss5-convert --stages nr`，exit 0，文件带音轨写出，导出的帧红是红、绿是绿、蓝是蓝。
+- **导出与缓存可用，已在硬件上验证，4K 与 720p 都通过。**
+
+  | 运行 | 结果 |
+  |---|---|
+  | 120 帧 720p | exit 0，4.11 MB 带音轨，颜色通道正确 |
+  | 4199 帧 4K | exit 0，324 MB，3840x2160 h264 + aac，139.97 秒 |
+  | `tools/amd/dlss5-amd-video.ps1` | 连续 4 / 6 / 12 个分段 |
+
+  4K 在 t=60 秒处对比同源帧：70.04% 像素改变，PSNR 27.91 dB，
+  各通道平均差 R 5.3 / G 4.2 / B 3.9 —— 是网络的编辑且通道顺序正确，不是直通。
 
   捕获读的是插件合成的那一帧：`RecordAmdPresentedCopy` 把呈现后的后缓冲拷进私有纹理，
   `AmdPresentedSRV` 供采样，取代只存在于 N 卡的 NGX 输出纹理。
