@@ -14098,10 +14098,19 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
 
         // sr runs on RTX VSR in the player wherever that can run, and on DLSS in the
         // helper otherwise; either makes the stage available.
-        const bool vsrReady=VsrExportReady(helpers,DetectHighPerformanceGpu().generation);
-        text("sr_engines",vsrReady?(worker?"vsr,dlss":"vsr"):(worker?"dlss":"none"));
+        //
+        // Neither is true on a Radeon: the helper runs the neural pass through the
+        // AMD add-on, and the DLSS Super Resolution path is NGX, which does not
+        // exist there. Reporting "dlss" for an AMD install would advertise a stage
+        // whose engine cannot start, so the AMD backend lists no sr engine and no sr
+        // stage - what it can do is the neural pass itself.
+        const GpuGeneration gpuGeneration=DetectHighPerformanceGpu().generation;
+        const bool amdBackend=IsAmdBackend(gpuGeneration);
+        const bool vsrReady=VsrExportReady(helpers,gpuGeneration);
+        const bool srAvailable=!amdBackend&&(worker||vsrReady);
+        text("sr_engines",!srAvailable?"none":(vsrReady?(worker?"vsr,dlss":"vsr"):"dlss"));
         std::vector<std::string> stages;
-        if((worker||vsrReady)&&!rungs.empty())stages.push_back("sr");
+        if(srAvailable&&!rungs.empty())stages.push_back("sr");
         if(worker)stages.push_back("nr");
         if(!still&&(!command.capabilities||maxMultiplier>=2))stages.push_back("fg");
         list("stages",stages);
