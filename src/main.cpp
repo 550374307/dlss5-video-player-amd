@@ -14112,7 +14112,11 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
         std::vector<std::string> stages;
         if(srAvailable&&!rungs.empty())stages.push_back("sr");
         if(worker)stages.push_back("nr");
-        if(!still&&(!command.capabilities||maxMultiplier>=2))stages.push_back("fg");
+        // Frame generation is NVIDIA's too: DLSSG evaluates nvngx_dlssg, and
+        // FrameGenerationPass only accepts an adapter whose VendorId is 0x10DE.
+        // On the AMD backend the stage would be listed and then fail at the first
+        // adapter check, so it is left out for the same reason sr is.
+        if(!amdBackend&&!still&&(!command.capabilities||maxMultiplier>=2))stages.push_back("fg");
         list("stages",stages);
 
         if(command.json){
