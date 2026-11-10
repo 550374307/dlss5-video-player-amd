@@ -171,11 +171,19 @@ then encodes and copies the source audio through. A 140 s 4K film took about
   pass, but the machine this was written on could not run it — see the next point —
   so no AMD export has actually produced a file yet. `tools/amd/dlss5-amd-video.ps1`
   is the verified way to get a file until someone confirms it on working hardware.
-- **Intermittent `amdhip64_7.dll +0x465007` crash on engine init.** Seen after
-  several hundred sessions; a cold reboot clears it and `hipInfo` stays healthy
-  throughout, so it reads as GPU-side state rather than this code. The same binary
-  in the same directory produced 20 good frames minutes before it started failing
-  100 % of the time.
+- **Intermittent `amdhip64_7.dll +0x465007` crash on engine init, and it gets worse
+  the longer the machine is up.** A newly launched process does work — processing a
+  video ran four consecutive 60-frame segments at 384–476 ms/frame with the runtime
+  logging `warm-up: first network run took 160 ms` and `network kernels: register
+  kernels, RDNA3 build`. Minutes later the same directory failed 5 out of 5 times,
+  as did a byte-identical copy, fresh directories, and frames that had just worked.
+  `hipInfo` reports gfx1101 and 15.98 GB throughout, VRAM was 4.1 GB of 16 GB before
+  a failing run, and no TDR appears in the event log.
+
+  What was ruled out: the NVIDIA `nvngx_dlssnr.dll` beside the runtime, `Scale`
+  (0.75 vs 1.0), `InlineWaitMs` (100 vs 200), frame content and size, residual dump
+  files, and VRAM exhaustion. The remaining explanation is that engine init degrades
+  within a single Windows boot; a cold reboot is the test. Tracked in issue #3.
 - No RTX VSR, no DLSS Super Resolution, no frame generation on AMD. The convert
   probe says so: `sr_engines=none`, `stages=nr,fg`. Earlier builds of this branch
   advertised `sr_engines=dlss` on a Radeon, which would have offered a stage whose
