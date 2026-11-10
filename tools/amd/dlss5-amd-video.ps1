@@ -20,6 +20,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# The encoder writes $Out directly and ffmpeg does not create directories, so a
+# destination folder that does not exist yet fails the join - after every segment
+# has already been rendered and encoded. That happened once during development and
+# cost about an hour of GPU time, so the folder is made up front and again just
+# before the join.
+$outParent = Split-Path -Parent $Out
+if ($outParent) { New-Item -ItemType Directory -Force -Path $outParent | Out-Null }
+
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $Work) { $Work = Join-Path $repo 'build\amd-video-work' }
 $ff      = Join-Path $repo 'external\ffmpeg\bin\ffmpeg.exe'
@@ -219,6 +227,8 @@ $parts_ = Get-ChildItem $parts -Filter 'part*.mp4' | Sort-Object Name
 Write-Host ''
 Write-Host ("== joining {0} parts ==" -f $parts_.Count)
 if ($parts_.Count -eq 0) { throw 'no parts produced' }
+# Again here: an hour of rendering must not be lost to a missing folder.
+if ($outParent) { New-Item -ItemType Directory -Force -Path $outParent | Out-Null }
 if ($parts_.Count -eq 1) {
     & $ff -hide_banner -loglevel error -i $parts_[0].FullName -i $Video -map 0:v:0 -map 1:a:0? -c:v copy -c:a copy -shortest -y $Out
 } else {
