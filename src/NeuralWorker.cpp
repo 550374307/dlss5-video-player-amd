@@ -1,4 +1,5 @@
 #include "NeuralWorker.h"
+#include "RuntimeLock.h"
 #include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
@@ -2134,6 +2135,9 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
         result.detail = L"The isolated neural helper executable is unavailable.";
         return result;
     }
+    // How many launches this preflight has made on the AMD backend after a HIP
+    // init fault. Counted across the loop below, not per iteration.
+    int amdStartupAttempts = 0;
     for (bool restarted = false;; restarted = true) {
         if (stop.stop_requested()) {
             result.cancelled = true;
@@ -2153,6 +2157,37 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
         if (launch.exitCode == neural_worker_detail::kConfigurationChangedExitCode && !restarted &&
             !reader.Malformed()) continue;
         if (launch.exitCode != 0) {
+            // The AMD backend's helper can fault inside amdhip64_7.dll during engine
+            // init (STATUS_ACCESS_VIOLATION, 0xC0000005). Measured on an RX 7800 XT,
+            // the fault lands right after the add-on logs "input contract" - that is,
+            // after the HIP device and adapter both resolved and while the engine is
+            // still building its weights and kernels.
+            //
+            // What this retry can and cannot do is worth being precise about, because
+            // it was measured rather than assumed: on a machine where the runtime is
+            // healthy, nothing here fires. On a machine where every launch faults, it
+            // was observed to fail all four attempts over 5.4 s and 6.5 s - so this is
+            // not a workaround for a runtime that has stopped working, and it is not
+            // presented as one. It exists for the transient case, where a single fault
+            // is followed by a clean launch, and it costs at most a few seconds of the
+            // preflight wait in the case it cannot help.
+            //
+            // Only this backend, only this crash: any other non-zero exit is reported
+            // immediately, and on NVIDIA nothing changes.
+            constexpr DWORD kAccessViolation = 0xC0000005u;
+            constexpr int kAmdStartupAttempts = 4;
+            if (launch.exitCode == kAccessViolation && AmdRuntimeStaged(executable.parent_path()) &&
+                ++amdStartupAttempts < kAmdStartupAttempts) {
+                if (stop.stop_requested()) {
+                    result.cancelled = true;
+                    result.detail = L"Neural preflight was cancelled.";
+                    return result;
+                }
+                // Long enough for the previous fault to be reaped, short enough that
+                // the user waits a second rather than wondering if anything happened.
+                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                continue;
+            }
             result.detail = L"The neural preflight helper exited with code " + std::to_wstring(launch.exitCode) + L".";
             return result;
         }
