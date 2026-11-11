@@ -1441,7 +1441,14 @@ private:
             // floor and rejects a render that was entirely neural. Leaving the series
             // empty is what NeuralTimingClearsFloor already documents as "this build
             // carries no timing instrumentation", which is exactly true here.
-            if (queued.neuralGpuMs > 0.0) attempt_.neuralGpuMs.push_back(queued.neuralGpuMs);
+            // Zero is a real measurement on NVIDIA - it means the evaluate was DLAA's
+            // cost only - and the timing floor is deliberately built to refuse it.
+            // Only the AMD backend, where NGX's timestamp queries do not exist at all
+            // and the value is 0.0 by construction, is exempt: pushing that would put
+            // a fabricated sample in the series. There the series stays empty and
+            // NeuralTimingClearsFloor's documented "no instrumentation" path applies.
+            if (queued.neuralGpuMs > 0.0 || !job_.amdNeuralBackend_)
+                attempt_.neuralGpuMs.push_back(queued.neuralGpuMs);
             job_.Emit(NeuralRenderPhase::NeuralRendering,attempt_.frames,attempt_.bytes,true);
             attempt_.stages.Push(queued.readMs, queued.guideMs, captureMs, queued.evalMs, writeMs,
                                  MillisecondsSince(queued.frameStart));
@@ -1748,7 +1755,8 @@ private:
                 attempt_.hasTimestamp=true;
             }
             attempt_.lastTimestamp=frame.timestamp100ns;
-            if (evaluation.neuralGpuMs > 0.0) attempt_.neuralGpuMs.push_back(evaluation.neuralGpuMs);
+            if (evaluation.neuralGpuMs > 0.0 || !job_.amdNeuralBackend_)
+                attempt_.neuralGpuMs.push_back(evaluation.neuralGpuMs);
             job_.Emit(NeuralRenderPhase::NeuralRendering,attempt_.frames,attempt_.bytes,true);
             attempt_.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
                                  MillisecondsSince(frameStart));
