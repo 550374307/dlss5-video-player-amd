@@ -2517,12 +2517,22 @@ private:
         // names will not load; a render on it would carry this one's key. A
         // receipt that names no DLL, one outside the runtime, or one that
         // declares another file version is refused, never let through.
+        //
+        // The AMD backend is exempt from this check, and only from this check. Its
+        // runtime is loaded as version.dll - the add-on's log says so in those words
+        // - so it can never name dlssnr_amd_pass1.dll, and demanding that it do so
+        // refused every AMD session with "did not name the NR DLL it loaded". What
+        // still binds the render to known bytes is the runtime lock, hashed above
+        // this point, plus the AMD evidence gate in the worker. StageExport.cpp got
+        // this exemption first; this is the live-preview path, which was missed.
         const neural_runtime::Runtime wanted=neural_runtime::Select(in_.gpu,in_.settings.previousRuntime);
+        if(!AmdRuntimeStaged(runtimeDirectory_)) {
         if(std::wstring refusal=NeuralRuntimeFileRefusal(PreflightNeuralRuntimeBanner(preflightJson_),runtimeDirectory_,wanted.file,wanted.version,
                                                          LockedFileVersion(*runtimeLock_,wanted.file));!refusal.empty()){
             completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);
             LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));
             return false;
+        }
         }
         return true;
     }
